@@ -632,6 +632,20 @@ int hle_vk_init(void)
     VkFormatProperties fp;
     vkGetPhysicalDeviceFormatProperties(v->phys, VK_FORMAT_R16G16_SSCALED, &fp);
     c->sscaled = fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+#ifdef __APPLE__
+    /* A portability driver (MoltenVK 1.2.11 and 1.4.2 alike) makes every
+     * resource of a bound argument buffer resident with useResource on each
+     * draw (bindMetalResources -> MVKUseResourceHelper::addImmediate): with
+     * the bindless set, every live texture per draw, a cost that grows with
+     * the textures a session made. Halo 2's Cairo Station (Radeon Pro 5300M):
+     * vkQueueSubmit2 held the render thread 360-850 ms/s, 84% of it there;
+     * with the draw sets' arrays instead, 26-30 ms/s at the same spot. */
+    if (c->bindless && has_ext(ext, ne, "VK_KHR_portability_subset") && !getenv("XBASED_HLE_MVK_BINDLESS")) {
+        c->bindless = false;
+        hle_log("xbased-hle-back", "vk: portability subset: the bindless set off (per-draw residency; "
+                "XBASED_HLE_MVK_BINDLESS keeps it)");
+    }
+#endif
     caps_override(c);
     c->fbfetch = c->fbfetch && c->dyn_render;  /* local read is dynamic rendering's */
     c->cbc_any = c->cbc_any && c->cbc;

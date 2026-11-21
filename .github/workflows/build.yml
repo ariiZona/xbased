@@ -1,0 +1,57 @@
+# Builds the PC editions on the platforms this machine isn't: Linux
+# (ubuntu-22.04, the AppImage's base) and Windows (MSYS2 CLANG64, the
+# toolchain BUILDING.md names). Builds only: nothing runs here.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld cmake ninja-build pkg-config python3 zlib1g-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxtst-dev \
+            libxfixes-dev libxkbcommon-dev libwayland-dev wayland-protocols libegl-dev libgl-dev \
+            libdecor-0-dev libdrm-dev libgbm-dev libasound2-dev libpulse-dev \
+            libpipewire-0.3-dev libudev-dev libdbus-1-dev libibus-1.0-dev
+      - name: Dependencies
+        run: bash tools/fetch_deps.sh
+      - name: Configure
+        run: cmake -S native -B ../build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+               -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+      - name: Build
+        run: cmake --build ../build/linux --target xbased
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          install: >-
+            git
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-python
+      - name: Dependencies
+        run: bash tools/fetch_deps.sh
+      - name: Configure
+        run: cmake -S native -B ../build/win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+               -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+      - name: Build
+        run: cmake --build ../build/win --target xbased

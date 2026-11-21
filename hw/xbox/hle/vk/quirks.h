@@ -33,6 +33,17 @@ enum {
      * binding's vertices are copied to the arena with each attribute moved to
      * an offset its components divide (pb/pbdraw.c). */
     HLE_QUIRK_VB_ALIGN = 1u << 2,
+    /* The swapchain image's acquire semaphore is never signalled when no
+     * image was free at the acquire (MoltenVK 1.4.2: MVKSwapchain ignores
+     * the timeout and returns a busy image; its later signal goes to
+     * encodeDeferredSignal with a nil command buffer, a no-op): a pass
+     * waiting on it would hold the one Metal queue for good. Found in its
+     * source while chasing a freeze at Halo 2's Cairo Station intro (now
+     * and then, the GPU short of a submitted value); not shown to be that
+     * freeze's cause. The presenter acquires with a fence instead
+     * (signalled on the CPU), waits for it itself, and its pass waits for
+     * nothing (vk/swapchain.c). */
+    HLE_QUIRK_ACQUIRE_FENCE = 1u << 3,
 };
 
 extern uint32_t g_hle_quirks;

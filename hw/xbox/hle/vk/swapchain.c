@@ -83,6 +83,7 @@ typedef struct PsFrame {
     VkCommandPool pool;
     VkCommandBuffer cb;
     VkSemaphore acquired;       /* its swapchain image is ready */
+    VkFence acq_fence;          /* the same on the CPU (HLE_QUIRK_ACQUIRE_FENCE) */
     /* the window pass's, FXAA's, EASU's, the frame counter's: one a pass of a
      * frame, as a set written again after a draw used it changes that draw
      * too where the driver reads sets as the GPU runs (AMD's: FXAA's pass,
@@ -130,6 +131,10 @@ static struct {
     VkImageView *view;
     VkSemaphore *drawn;         /* its pass done: what its present waits for */
     bool stale;                 /* out of date: made again at the next begin */
+    /* HLE_QUIRK_ACQUIRE_FENCE: image idx acquired, its fence (the current
+     * frame's) not signalled yet: the next begin waits again, no acquire */
+    bool acq_held;
+    bool acq_fenced;            /* the image begun was acquired so: its pass waits for nothing */
     bool follows;               /* the surface's transform is none: SUBOPTIMAL means made again */
     /* the frame shown */
     HleDispFrame f;
@@ -699,12 +704,14 @@ static bool init(void)
                                         .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
                                         .queueFamilyIndex = g_hvk.qfam };
         VkSemaphoreCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
         VkDescriptorSetLayout l[PS_SETS] = { g_ps.dsl, g_ps.dsl, g_ps.dsl, g_ps.dsl, g_ps.dsl };
         VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                                             .descriptorPool = g_ps.dp, .descriptorSetCount = PS_SETS,
                                             .pSetLayouts = l };
         if (T.vkCreateCommandPool(g_hvk.dev, &cpi, NULL, &f->pool) != VK_SUCCESS ||
             T.vkCreateSemaphore(g_hvk.dev, &si, NULL, &f->acquired) != VK_SUCCESS ||
+            T.vkCreateFence(g_hvk.dev, &fci, NULL, &f->acq_fence) != VK_SUCCESS ||
             T.vkAllocateDescriptorSets(g_hvk.dev, &dai, f->set) != VK_SUCCESS) {
             return false;
         }
@@ -752,8 +759,26 @@ static void idle(void)
 
 static bool remote_images(void);
 
+/* An image acquired with a fence that never came (HLE_QUIRK_ACQUIRE_FENCE)
+ * goes with its swapchain; the old swapchain may still signal that fence,
+ * so the frame takes a new one. */
+static void acq_drop(void)
+{
+    if (!g_ps.acq_held) {
+        return;
+    }
+    PsFrame *f = &g_ps.fr[g_ps.cur];
+    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    T.vkDestroyFence(g_hvk.dev, f->acq_fence, NULL);
+    if (T.vkCreateFence(g_hvk.dev, &fci, NULL, &f->acq_fence) != VK_SUCCESS) {
+        f->acq_fence = VK_NULL_HANDLE;  /* the semaphore's way from then */
+    }
+    g_ps.acq_held = false;
+}
+
 static void drop_images(void)
 {
+    acq_drop();
     if (remote_images()) {
         g_ps.img = NULL;    /* the frame's pictures' (static, freed by remote_drop) */
         g_ps.view = NULL;
@@ -1661,6 +1686,29 @@ uint32_t hle_present_remote_mouse(void *out, uint32_t n, int64_t *at)
 }
 #endif
 
+/* HLE_QUIRK_ACQUIRE_FENCE: the acquired image is free once its fence is
+ * signalled (on the CPU, when the image's last present is done); not yet,
+ * and the next refresh waits again for the same image. */
+static unsigned g_acq_late;    /* images not free at their acquire (the stats) */
+
+static bool acq_wait(PsFrame *f, uint32_t *w, uint32_t *h, int64_t t0)
+{
+    const VkResult r = T.vkWaitForFences(g_hvk.dev, 1, &f->acq_fence, VK_TRUE, 100000000ull);
+    g_acquire_ns += hle_now_ns() - t0;
+    if (r != VK_SUCCESS) {
+        if (r != VK_TIMEOUT) {
+            hle_vk_check(r, "vkWaitForFences (acquire)");
+        }
+        return false;
+    }
+    T.vkResetFences(g_hvk.dev, 1, &f->acq_fence);
+    g_ps.acq_held = false;
+    g_ps.acq_fenced = true;
+    *w = g_ps.wsize.width;
+    *h = g_ps.wsize.height;
+    return true;
+}
+
 bool hle_present_begin(HleWindow *win, uint32_t *w, uint32_t *h)
 {
     if (g_ps.failed || !hle_vk_ready() || hle_vk_lost()) {
@@ -1720,8 +1768,12 @@ bool hle_present_begin(HleWindow *win, uint32_t *w, uint32_t *h)
     }
     const int64_t ta0 = hle_now_ns();
     g_wait_ns += ta0 - tw0;
-    VkResult r = T.vkAcquireNextImageKHR(g_hvk.dev, g_ps.sc, 100000000ull, f->acquired, VK_NULL_HANDLE,
-                                         &g_ps.idx);
+    const bool by_fence = hle_quirk(HLE_QUIRK_ACQUIRE_FENCE) && f->acq_fence;
+    if (by_fence && g_ps.acq_held) {
+        return acq_wait(f, w, h, ta0);  /* the image the last begin acquired */
+    }
+    VkResult r = T.vkAcquireNextImageKHR(g_hvk.dev, g_ps.sc, 100000000ull, by_fence ? VK_NULL_HANDLE : f->acquired,
+                                         by_fence ? f->acq_fence : VK_NULL_HANDLE, &g_ps.idx);
     g_acquire_ns += hle_now_ns() - ta0;
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         g_ps.stale = true;
@@ -1737,6 +1789,7 @@ bool hle_present_begin(HleWindow *win, uint32_t *w, uint32_t *h)
         }
         return false;                   /* timed out: the next refresh tries again */
     }
+    g_ps.acq_held = by_fence;           /* (a swapchain made again drops it: acq_drop) */
     if (g_ps.idx >= g_ps.nimg) {
         hle_log("xbased-hle-back", "present: acquired image %u of %u", g_ps.idx, g_ps.nimg);
         g_ps.stale = true;
@@ -1745,6 +1798,13 @@ bool hle_present_begin(HleWindow *win, uint32_t *w, uint32_t *h)
     if (r == VK_SUBOPTIMAL_KHR && g_ps.follows) {
         g_ps.stale = true;              /* this image, then another swapchain */
     }
+    if (by_fence) {
+        if (T.vkGetFenceStatus(g_hvk.dev, f->acq_fence) == VK_NOT_READY) {
+            g_acq_late++;               /* (a semaphore here would never have been signalled) */
+        }
+        return acq_wait(f, w, h, hle_now_ns());
+    }
+    g_ps.acq_fenced = false;
     *w = g_ps.wsize.width;
     *h = g_ps.wsize.height;
     return true;
@@ -2919,7 +2979,8 @@ void hle_present_end(float sx, float sy, bool fxaa, int upscale, bool average, i
         { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_ps.drawn[g_ps.idx],
           .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT } };
     VkCommandBufferSubmitInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb };
-    VkSubmitInfo2 si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 1,
+    /* HLE_QUIRK_ACQUIRE_FENCE: the image was waited for at the begin */
+    VkSubmitInfo2 si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = g_ps.acq_fenced ? 0 : 1,
                          .pWaitSemaphoreInfos = &wait, .commandBufferInfoCount = 1,
                          .pCommandBufferInfos = &cbi, .signalSemaphoreInfoCount = cpu_wait ? 1 : 2,
                          .pSignalSemaphoreInfos = sig };
@@ -2982,7 +3043,12 @@ void hle_present_end(float sx, float sy, bool fxaa, int upscale, bool average, i
                 g_wait_ns / 1e6 / s,
                 hle_quirk(HLE_QUIRK_PRESENT_CPU_WAIT) ? "each before its present" : "the present waits on the GPU",
                 g_acquire_ns / 1e6 / s);
+        if (g_acq_late) {
+            hle_log("xbased-hle-back", "present: %u images acquired before they were free (waited on the CPU)",
+                    g_acq_late);
+        }
         g_submit_ns = g_present_ns = g_wait_ns = g_acquire_ns = 0;
+        g_acq_late = 0;
         s_t0 = now;
     }
 }

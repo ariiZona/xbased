@@ -29,6 +29,11 @@ static bool any(const HleDriver *d)
     return true;
 }
 
+static bool moltenvk(const HleDriver *d)
+{
+    return d->drv.driverID == VK_DRIVER_ID_MOLTENVK;
+}
+
 /* AMD hardware, any driver (vendor 0x1002) */
 static bool amd(const HleDriver *d)
 {
@@ -45,6 +50,12 @@ static const HleQuirk k_quirks[] = {
      * integers at offset 3, which AMD's vertex fetch reads only at an offset
      * their size divides. */
     { HLE_QUIRK_VB_ALIGN, "vb_align", amd },
+    /* MoltenVK 1.4.2 (Radeon Pro 5300M, macOS 15, 2026-11-21): MVKImage.mm's
+     * deferred acquire signal is encoded into a nil command buffer (see
+     * quirks.h); found while Halo 2 froze now and then at Cairo Station's
+     * intro (the GPU short of a submitted value, 4 submits pending, no
+     * error), that freeze not reproduced since nor tied to it. */
+    { HLE_QUIRK_ACQUIRE_FENCE, "acquire_fence", moltenvk },
 };
 
 static uint32_t g_defaults;

@@ -25,7 +25,10 @@ jobs:
       - name: Dependencies
         run: bash tools/fetch_deps.sh
       - name: Configure
-        run: cmake -S native -B ../build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        # LTO off here: ubuntu-22.04's clang 14 links ThinLTO through lld
+        # without its entry symbol ("undefined symbol: main"). The release
+        # builds keep LTO; this job checks that the sources compile and link.
+        run: cmake -S native -B ../build/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DXBASED_LTO=OFF \
                -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
       - name: Build
         run: cmake --build ../build/linux --target xbased

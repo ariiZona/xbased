@@ -807,11 +807,12 @@ int hle_vk_init(void)
         exts[nx++] = "VK_KHR_portability_subset";
         /* Metal draws no fans: MoltenVK's triangleFans is false, the
          * push buffer's fans and polygons go as triangle lists (pb/pbres.c) */
-        g_hle_no_fans = true;
+        g_hle_no_fans = !getenv("XBASED_HLE_FANS");                 /* (debug: off) */
         /* Metal: vertex attribute offsets and strides multiples of 4 */
-        g_hle_vattr_align4 = true;
-        hle_log("xbased-hle-back", "vk: portability subset: triangle fans drawn as lists, vertex attributes "
-                "realigned to 4 bytes");
+        g_hle_vattr_align4 = !getenv("XBASED_HLE_NO_VALIGN4");      /* (debug: off) */
+        hle_log("xbased-hle-back", "vk: portability subset: triangle fans %s, vertex attributes %s",
+                g_hle_no_fans ? "drawn as lists" : "left as fans (XBASED_HLE_FANS)",
+                g_hle_vattr_align4 ? "realigned to 4 bytes" : "as they come (XBASED_HLE_NO_VALIGN4)");
     }
 #endif
 #ifdef _WIN32

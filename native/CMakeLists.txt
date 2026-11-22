@@ -4,6 +4,11 @@
 # xbased_native is the core library, the xbased executable runs it
 # (cmake/app_win.cmake).
 cmake_minimum_required(VERSION 3.20)
+# macOS: the oldest system the build runs on, MoltenVK's own (before
+# project(), which sets the compilers up with it)
+if(CMAKE_HOST_APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "the oldest macOS the build runs on" FORCE)
+endif()
 project(xbased_native C CXX)
 
 set(CMAKE_C_STANDARD 11)
@@ -38,9 +43,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
   set(NC_LINUX_X64 ON)
 endif()
 # macOS on Intel: the same translator and POSIX code as Linux
-# (cmake/macos.cmake); NC_POSIX_X64 is either of the two.
-if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+# (cmake/macos.cmake); NC_POSIX_X64 is either of the two. Built on an Intel
+# Mac, or for one on Apple silicon (CMAKE_OSX_ARCHITECTURES=x86_64): the
+# translator emits x86-64 code, which an arm64 build can't run.
+if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
+              (NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")))
   set(NC_MACOS_X64 ON)
+elseif(APPLE)
+  message(FATAL_ERROR "xbased on macOS is for Intel Macs (x86-64); on Apple silicon, configure with "
+                      "-DCMAKE_OSX_ARCHITECTURES=x86_64")
 endif()
 if(NC_LINUX_X64 OR NC_MACOS_X64)
   set(NC_POSIX_X64 ON)

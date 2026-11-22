@@ -1643,11 +1643,13 @@ static void shader_cache_by_version(const char *base)
 }
 #ifdef __APPLE__
 #include <dlfcn.h>
-/* macOS: Vulkan is a library found at run time, not a system one. A loader
- * (libvulkan: the SDK's, Homebrew's vulkan-loader) first, for its layers,
- * else MoltenVK itself; beside the executable first (a package carries
- * its own), then where Homebrew and the SDK put them. SDL (the window's
- * surface) and the renderer (volk) are given the same one. */
+/* macOS: Vulkan is a library found at run time, not a system one. The
+ * MoltenVK beside the executable first: the build puts Khronos' release
+ * there (cmake/macos.cmake), the one it's tested with. Else a loader
+ * (libvulkan: a package's, the SDK's, Homebrew's vulkan-loader), else a
+ * MoltenVK where Homebrew puts it; SDL_VULKAN_LIBRARY names one in front of
+ * them all (a loader for its layers, another MoltenVK to compare). SDL (the
+ * window's surface) and the renderer (volk) are given the same one. */
 static void mac_vulkan(void)
 {
     char here[MAX_PATH] = "";
@@ -1658,25 +1660,32 @@ static void mac_vulkan(void)
         }
     }
     const char *env = SDL_getenv("SDL_VULKAN_LIBRARY");
-    const char *const names[] = {"libvulkan.1.dylib", "libMoltenVK.dylib"};
-    const char *const dirs[] = {here, "/usr/local/lib/", "/opt/homebrew/lib/"};
+    const char *const tries[][2] = {
+        {here, "libMoltenVK.dylib"},
+        {here, "libvulkan.1.dylib"},
+        {"/usr/local/lib/", "libvulkan.1.dylib"},
+        {"/opt/homebrew/lib/", "libvulkan.1.dylib"},
+        {"/usr/local/lib/", "libMoltenVK.dylib"},
+        {"/opt/homebrew/lib/", "libMoltenVK.dylib"},
+    };
     char path[MAX_PATH + 64];
     void *lib = NULL;
+    /* MoltenVK's warnings and errors, not its start-up report (Khronos'
+     * release logs at info level); MVK_CONFIG_LOG_LEVEL set already wins */
+    setenv("MVK_CONFIG_LOG_LEVEL", "2", 0);
     if (env && *env) {
         snprintf(path, sizeof(path), "%s", env);
         lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     }
-    for (size_t n = 0; !lib && n < sizeof(names) / sizeof(names[0]); n++) {
-        for (size_t d = 0; !lib && d < sizeof(dirs) / sizeof(dirs[0]); d++) {
-            if (dirs[d][0]) {
-                snprintf(path, sizeof(path), "%s%s", dirs[d], names[n]);
-                lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-            }
+    for (size_t i = 0; !lib && i < sizeof(tries) / sizeof(tries[0]); i++) {
+        if (tries[i][0][0]) {
+            snprintf(path, sizeof(path), "%s%s", tries[i][0], tries[i][1]);
+            lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         }
     }
     void *gipa = lib ? dlsym(lib, "vkGetInstanceProcAddr") : NULL;
     if (!gipa) {
-        nc_log("xbased-app", "vulkan: no MoltenVK or Vulkan loader found (brew install molten-vk)");
+        nc_log("xbased-app", "vulkan: no MoltenVK or Vulkan loader found (tools/fetch_deps.sh puts MoltenVK beside the build)");
         return;
     }
     nc_log("xbased-app", "vulkan: %s", path);

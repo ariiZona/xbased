@@ -41,7 +41,13 @@ endfunction()
 # segment (core/macos_reserve.s) starts at 0x10000 and is widened after the
 # link to 0x200000000 (tools/macos/reserve_guest.py), where __TEXT starts:
 # not position-independent, so nothing slides into the guest's space.
+# Its Vulkan driver, MoltenVK, beside it: app/win_main.c's mac_vulkan loads
+# that one first. tools/fetch_deps.sh puts Khronos' release in NC_DEPS.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(NC_MOLTENVK "${NC_DEPS}/MoltenVK/libMoltenVK.dylib")
+if(NOT EXISTS "${NC_MOLTENVK}")
+  message(WARNING "no ${NC_MOLTENVK} (tools/fetch_deps.sh): the app will look for a MoltenVK or Vulkan loader of the system's")
+endif()
 function(nc_macos_exe)
   foreach(t ${ARGN})
     if(TARGET ${t})
@@ -52,6 +58,11 @@ function(nc_macos_exe)
       add_custom_command(TARGET ${t} POST_BUILD
         COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tools/macos/reserve_guest.py" "$<TARGET_FILE:${t}>"
         VERBATIM)
+      if(EXISTS "${NC_MOLTENVK}")
+        add_custom_command(TARGET ${t} POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NC_MOLTENVK}" "$<TARGET_FILE_DIR:${t}>/libMoltenVK.dylib"
+          VERBATIM)
+      endif()
     endif()
   endforeach()
 endfunction()

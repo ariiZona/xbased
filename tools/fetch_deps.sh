@@ -2,7 +2,7 @@
 # The third-party sources xbased builds with, at the versions it's tested
 # with, cloned into ../deps beside the repository (or the folder given).
 #   tools/fetch_deps.sh [deps dir]
-# Runs on Linux and in MSYS2 on Windows; needs git.
+# Runs on Linux, macOS and in MSYS2 on Windows; needs git (and curl on macOS).
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 DEPS=${1:-$REPO/../deps}
@@ -43,5 +43,28 @@ if [ ! -f "$DEPS/zydis/dependencies/zycore/CMakeLists.txt" ]; then
   git -C "$DEPS/zydis/dependencies/zycore" remote add origin https://github.com/zyantific/zycore-c.git
   git -C "$DEPS/zydis/dependencies/zycore" fetch -q --depth 1 origin 0b2432ced0884fd152b471d97ecf0258ff4d859f
   git -C "$DEPS/zydis/dependencies/zycore" checkout -q FETCH_HEAD
+fi
+# MoltenVK on macOS (Vulkan over Metal, Apache-2.0): Khronos' release, its
+# dylib for both kinds of Mac, checked against its hash; the build puts it
+# beside the executable (cmake/macos.cmake)
+if [ "$(uname -s)" = Darwin ]; then
+  mvk_ver=1.4.2
+  mvk_sum=f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e
+  mvk="$DEPS/MoltenVK"
+  if [ "$(cat "$mvk/version" 2>/dev/null)" = "$mvk_ver" ]; then
+    echo "MoltenVK: up to date"
+  else
+    echo "MoltenVK: $mvk_ver"
+    rm -rf "$mvk"
+    mkdir -p "$mvk"
+    curl -fsSL -o "$mvk/MoltenVK-macos.tar" \
+      "https://github.com/KhronosGroup/MoltenVK/releases/download/v$mvk_ver/MoltenVK-macos.tar"
+    echo "$mvk_sum  $mvk/MoltenVK-macos.tar" | shasum -a 256 -c - >/dev/null
+    tar -xf "$mvk/MoltenVK-macos.tar" -C "$mvk" --strip-components 1 \
+      MoltenVK/LICENSE MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
+    mv "$mvk/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" "$mvk/"
+    rm -rf "$mvk/MoltenVK" "$mvk/MoltenVK-macos.tar"
+    echo "$mvk_ver" > "$mvk/version"
+  fi
 fi
 echo "deps ready in $DEPS"

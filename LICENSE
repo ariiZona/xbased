@@ -39,5 +39,6 @@ above:
   (licenses/amd-fsr1.license.txt).
 - The libraries the executables are built with: SDL3, Zydis and Zycore,
   glslang, volk, SPIRV-Reflect, nv2a_vsh_cpu, libchdr with its LZMA SDK and
-  zstd decoders, xxHash, libslirp, zlib, and on Windows the LLVM C++ runtime
-  (libc++, compiler-rt) and winpthreads. Their licenses are in licenses/.
+  zstd decoders, xxHash, libslirp, zlib, on Windows the LLVM C++ runtime
+  (libc++, compiler-rt) and winpthreads, and on macOS MoltenVK (Apache-2.0).
+  Their licenses are in licenses/.

@@ -1599,6 +1599,68 @@ void nc_frame_close(void *frame)
     }
 }
 
+#elif defined(__APPLE__) /* ----------------------------------------------- macOS: none */
+
+/* No frame on macOS: a process can't hold another's window there, so each
+ * run's window stands on its own, as on Linux without X11 (a state loaded
+ * or a title relaunching swaps windows). The X11 code below built only
+ * where X11's headers happened to be installed, and at run time found no
+ * DISPLAY (with XQuartz's, it forked a frame that found no libX11.so.6). */
+void nc_frame_fork(bool fullscreen, bool fs60)
+{
+    (void)fullscreen;
+    (void)fs60;
+}
+
+void *nc_frame_get(const char *title, bool fullscreen, bool fs60)
+{
+    (void)title;
+    (void)fullscreen;
+    (void)fs60;
+    return NULL;
+}
+
+void nc_frame_adopt(void *frame, SDL_Window *child, const char *title, bool hidden)
+{
+    (void)frame;
+    (void)child;
+    (void)title;
+    (void)hidden;
+}
+
+void nc_frame_fill(void *frame, SDL_Window *child)
+{
+    (void)frame;
+    (void)child;
+}
+
+const char *nc_frame_token(void)
+{
+    return NULL;
+}
+
+void nc_frame_raise(void *frame, SDL_Window *child)
+{
+    (void)frame;
+    (void)child;
+}
+
+void nc_frame_toggle_fullscreen(void *frame)
+{
+    (void)frame;
+}
+
+bool nc_frame_minimized(void *frame)
+{
+    (void)frame;
+    return false;
+}
+
+void nc_frame_close(void *frame)
+{
+    (void)frame;
+}
+
 #else /* ------------------------------------------------------------ Linux: X11 */
 
 #include <X11/Xlib.h>

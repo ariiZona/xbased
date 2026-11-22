@@ -14,7 +14,7 @@
  * frame's. Linux: X11 only (a Wayland client can't hold another's
  * surface): the game's process forks before anything else, the parent
  * (the process the dashboard waits on) becomes the frame, the run's
- * window reparented into it.
+ * window reparented into it. macOS: none (each run's window its own).
  */
 #ifndef XBASED_WIN_FRAME_H
 #define XBASED_WIN_FRAME_H

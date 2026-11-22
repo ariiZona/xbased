@@ -64,6 +64,10 @@ The host tests: `bash tools/native/host-tests.sh ../build/macos`
   times, monotonic condition deadlines, `clock_nanosleep`, `gettid`, thread
   CPU clocks, `eventfd` over a pipe, ucontext. nv2a's waits on an address
   use the kernel's ulocks, HleSem is a dispatch semaphore.
+- **No game frame** (`native/app/win_frame.c`): a process can't hold
+  another's window on macOS, so each run's window stands on its own, as
+  on Linux without X11 (a state loaded or a title relaunching swaps
+  windows).
 - **Vulkan is MoltenVK**, loaded at run time: the one beside the
   executable first, then a loader (`libvulkan.1.dylib`), then a MoltenVK
   where Homebrew puts it. `SDL_VULKAN_LIBRARY` names another (a loader for

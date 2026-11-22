@@ -1,6 +1,6 @@
 #!/bin/bash
 # The host tests of the PC build, with one command (the MSYS2 CLANG64 shell
-# on Windows, or Linux; clang, cmake and ninja as for the build itself):
+# on Windows, Linux or macOS; clang, cmake and ninja as for the build itself):
 #
 #   tools/native/host-tests.sh [the app's build folder]
 #
@@ -19,8 +19,15 @@ set -u
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 case "$(uname -s)" in
   MINGW*|MSYS*) PLAT=win; EXE=.exe ;;
+  Darwin) PLAT=macos; EXE= ;;
   *) PLAT=linux; EXE= ;;
 esac
+# the POSIX tests' compat headers: Linux's, and on macOS its shims in front
+# of them, as the app builds (cmake/macos.cmake)
+POSIX_INC="-Inative/compat/linux/include"
+if [ "$PLAT" = macos ]; then
+  POSIX_INC="-D_DARWIN_C_SOURCE -Inative/compat/macos/include $POSIX_INC -include nc_macos_posix.h"
+fi
 APP=${1:-$REPO/../build/$PLAT}
 OUT=${HOST_TESTS_OUT:-$REPO/../build/tests}
 DEPS=${NC_DEPS:-$REPO/../deps}
@@ -84,20 +91,20 @@ if [ "$PLAT" = win ]; then
   # a game folder read as a disc, through the reader
   build fold_test -g -fsanitize=address -D_GNU_SOURCE -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00     -I. -Inative/compat/win/include -include nc_win_posix.h tests/native/disc/fold_test.c native/core/fold_image.c     native/core/xdvdfs.c native/compat/win/win.c -lws2_32 -liphlpapi -lwinmm -lbcrypt -lsynchronization -lpthread
 else
-  build xdvdfs_test -g -fsanitize=address -D_GNU_SOURCE -I. -Inative/compat/linux/include     tests/native/disc/xdvdfs_test.c native/core/xdvdfs.c
-  build fold_test -g -fsanitize=address -D_GNU_SOURCE -I. -Inative/compat/linux/include     tests/native/disc/fold_test.c native/core/fold_image.c native/core/xdvdfs.c -lpthread
+  build xdvdfs_test -g -fsanitize=address -D_GNU_SOURCE -I. $POSIX_INC     tests/native/disc/xdvdfs_test.c native/core/xdvdfs.c
+  build fold_test -g -fsanitize=address -D_GNU_SOURCE -I. $POSIX_INC     tests/native/disc/fold_test.c native/core/fold_image.c native/core/xdvdfs.c -lpthread
 fi
 # the USB stack: a host driver's enumeration of the hubs and a gamepad, a report and rumble
 if [ "$PLAT" = win ]; then
   build usb_test -g -fsanitize=address -D_GNU_SOURCE -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00     -I. -Inative/compat/win/include -include nc_win_posix.h "-I$DEPS/SDL3/include" tests/native/usb/usb_test.c tests/native/usb/sdl_stub.c native/dev/usb.c     native/dev/usb_hub.c native/dev/xid.c native/dev/communicator.c native/state/state.c native/core/props.c native/compat/win/win.c -lz -lws2_32 -liphlpapi     -lwinmm -lbcrypt -lsynchronization -lpthread
 else
-  build usb_test -g -fsanitize=address -D_GNU_SOURCE -I. -Inative/compat/linux/include "-I$DEPS/SDL3/include" tests/native/usb/usb_test.c tests/native/usb/sdl_stub.c     native/dev/usb.c native/dev/usb_hub.c native/dev/xid.c native/dev/communicator.c native/state/state.c native/core/props.c -lz -lpthread
+  build usb_test -g -fsanitize=address -D_GNU_SOURCE -I. $POSIX_INC "-I$DEPS/SDL3/include" tests/native/usb/usb_test.c tests/native/usb/sdl_stub.c     native/dev/usb.c native/dev/usb_hub.c native/dev/xid.c native/dev/communicator.c native/state/state.c native/core/props.c -lz -lpthread
 fi
 # the kernel's dispatch of processor exceptions to a title's handlers
 if [ "$PLAT" = win ]; then
   build seh_test -g -fsanitize=address -D_GNU_SOURCE -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00 -I. -Inative/compat/win/include -include nc_win_posix.h tests/native/kernel/seh_test.c native/kernel/seh.c -lpthread
 else
-  build seh_test -g -fsanitize=address -D_GNU_SOURCE -I. -Inative/compat/linux/include tests/native/kernel/seh_test.c native/kernel/seh.c -lpthread
+  build seh_test -g -fsanitize=address -D_GNU_SOURCE -I. $POSIX_INC tests/native/kernel/seh_test.c native/kernel/seh.c -lpthread
 fi
 # the kernel's files and devices with no title (paths, partitions, handles, a state's open files),
 # the savestate's cache-drive section read as a file from anywhere, and the mods' manifest and
@@ -107,9 +114,9 @@ if [ "$PLAT" = win ]; then
   build cache_test -g -fsanitize=address -D_GNU_SOURCE -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00 -I. "-I$DEPS/xxhash" -Inative/compat/win/include -include nc_win_posix.h tests/native/state/cache_test.c native/state/cache.c native/state/state.c native/compat/win/win.c -lz -lws2_32 -liphlpapi -lwinmm -lbcrypt -lsynchronization -lpthread
   build mods_test -g -fsanitize=address -D_GNU_SOURCE -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00 -I. -Inative/compat/glib -Inative/compat/win/include -include nc_win_posix.h tests/native/core/mods_test.c native/core/mods.c native/core/cheats.c hw/xbox/hle/core/xbe.c native/state/state.c native/compat/win/win.c -lz -lws2_32 -liphlpapi -lwinmm -lbcrypt -lsynchronization -lpthread
 else
-  build io_test -g -fsanitize=address -D_GNU_SOURCE -I. -Inative/compat/linux/include tests/native/kernel/io_test.c native/kernel/io.c native/kernel/ob.c native/kernel/pool.c native/core/xdvdfs.c native/state/state.c native/core/props.c native/compat/linux/linux.c -lz -lpthread
-  build cache_test -g -fsanitize=address -D_GNU_SOURCE -I. "-I$DEPS/xxhash" -Inative/compat/linux/include tests/native/state/cache_test.c native/state/cache.c native/state/state.c -lz -lpthread
-  build mods_test -g -fsanitize=address -D_GNU_SOURCE -I. -Inative/compat/glib -Inative/compat/linux/include tests/native/core/mods_test.c native/core/mods.c native/core/cheats.c hw/xbox/hle/core/xbe.c native/state/state.c native/compat/linux/linux.c -lz -lpthread
+  build io_test -g -fsanitize=address -D_GNU_SOURCE -I. $POSIX_INC tests/native/kernel/io_test.c native/kernel/io.c native/kernel/ob.c native/kernel/pool.c native/core/xdvdfs.c native/state/state.c native/core/props.c native/compat/linux/linux.c -lz -lpthread
+  build cache_test -g -fsanitize=address -D_GNU_SOURCE -I. "-I$DEPS/xxhash" $POSIX_INC tests/native/state/cache_test.c native/state/cache.c native/state/state.c -lz -lpthread
+  build mods_test -g -fsanitize=address -D_GNU_SOURCE -I. -Inative/compat/glib $POSIX_INC tests/native/core/mods_test.c native/core/mods.c native/core/cheats.c hw/xbox/hle/core/xbe.c native/state/state.c native/compat/linux/linux.c -lz -lpthread
 fi
 
 # the translator against the processor

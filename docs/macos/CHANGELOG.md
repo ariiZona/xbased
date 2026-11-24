@@ -3,7 +3,7 @@
 The port's own changes, on top of upstream's releases (its changelog is
 [CHANGELOG.md](../../CHANGELOG.md)).
 
-## Unreleased (on 1.2.4)
+## Unreleased (on 1.2.8)
 
 ### New
 - xbased builds and runs on Intel Macs (macOS 12 or later), with MoltenVK

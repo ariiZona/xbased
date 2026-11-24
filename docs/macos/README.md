@@ -48,7 +48,7 @@ On Apple silicon, `-DCMAKE_OSX_ARCHITECTURES=x86_64` builds for Intel Macs
 (the result can't run there); that's how the CI builds it.
 
 The host tests: `bash tools/native/host-tests.sh ../build/macos`
-(`hle/test_psh` fails upstream since 1.2.3; `cputest` is Windows's).
+(`cputest` is Windows's).
 
 ## What differs from Linux
 
@@ -91,7 +91,8 @@ The log's start says which are on (`vk: portability subset: ...`,
 
 ## Known problems
 
-- Halo 2: blocky, striped light on some lit metal floors (Cairo Station),
-  under investigation; not yet compared with the same game on Windows.
+- Halo 2: blocky, striped light on some lit metal floors (Cairo Station).
+  Upstream has it on Windows too; whether the unlit case is macOS-only is
+  still open.
 - Loading a savestate restarts xbased, which then draws nothing.
 - Now and then, a guest fault while Halo 2 loads a level.

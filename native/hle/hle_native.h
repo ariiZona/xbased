@@ -38,6 +38,11 @@ void nc_hle_set_anisotropy(int level);
 /* Before boot: the app's "Asynchronous shader compilation" and "Build cached
  * shaders before starting" settings (hw/xbox/hle/vk/pipeasync.h). */
 void nc_hle_set_pipeline_options(bool async, bool prebuild, bool hybrid);
+#ifdef __APPLE__
+/* Before boot: the Vulkan driver the app found (macOS: MoltenVK beside the
+ * executable, app/win_main.c mac_vulkan), where volk wouldn't look. */
+void nc_hle_set_vk_loader(void *gipa);
+#endif
 
 /* host_native.c (host.h on this core): the registers probes see, set up at
  * boot; the JIT flush the HLE asked for, at the end of a system op, or

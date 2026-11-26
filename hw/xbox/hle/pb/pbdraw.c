@@ -4725,6 +4725,9 @@ static bool recopied(uint32_t from, uint32_t len)
  * halves). */
 static uint32_t attr_comp(uint32_t fmt)
 {
+    if (g_hle_vattr_align4) {
+        return 4;                           /* Metal (MoltenVK): every attribute at a multiple of 4 */
+    }
     switch (fmt & 0xF) {
     case 0: case 4: return 1;               /* UB_D3D, UB_OGL */
     case 1: case 5: case 6: return 2;       /* S1, S32K, CMP */
@@ -4864,7 +4867,7 @@ static void draw_arrays(void)
         }
         coh_pend_wait(from, len);           /* a copy queued into it lands first */
         const uint8_t *src = hle_pa_ptr(from, len);
-        if (src && hle_quirk(HLE_QUIRK_VB_ALIGN) && vb_misaligned(&d, b, base[b])) {
+        if (src && (hle_quirk(HLE_QUIRK_VB_ALIGN) || g_hle_vattr_align4) && vb_misaligned(&d, b, base[b])) {
             if (!vb_realign(&d, b, src, from, len, st ? hi - lo + 1 : 1)) {
                 skip(SK_DRAW_ARRAYS_ARENA);
                 return;
@@ -4893,8 +4896,7 @@ static void draw_arrays(void)
      * snowy town as ~17k short strips a frame, which as indexed draws went to
      * the GPU one by one at ~1.7 us each, and the frame took the GPU 30 ms
      * at 2x (26 fps). */
-    if (!joined && hi - lo + 1 == n && pt != NV2A_PRIM_QUADS && pt != NV2A_PRIM_LINE_LOOP &&
-        pt != HLE_PT_QUADLIST_EDGES && pt != HLE_PT_QUADSTRIP_EDGES) {
+    if (!joined && hi - lo + 1 == n && !hle_draw_prim_converted(pt)) {
         bool seq = true;
         for (uint32_t i = 0; i < n && seq; i++) {
             seq = g_pd.idx[i] == lo + i;
@@ -4916,8 +4918,7 @@ static void draw_arrays(void)
         skip(SK_DRAW_ARRAYS_ARENA2);
         return;
     }
-    if (pt == NV2A_PRIM_QUADS || pt == NV2A_PRIM_LINE_LOOP || pt == HLE_PT_QUADLIST_EDGES ||
-        pt == HLE_PT_QUADSTRIP_EDGES) {
+    if (hle_draw_prim_converted(pt)) {
         for (uint32_t i = 0; i < n; i++) {
             g_pd.idx16[i] = (uint16_t)(g_pd.idx[i] - lo);
         }

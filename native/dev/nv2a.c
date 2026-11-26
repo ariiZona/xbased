@@ -41,6 +41,8 @@
 #include <time.h>
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <unistd.h>
 #else
 #include <linux/futex.h>
 #include <sys/syscall.h>
@@ -1169,7 +1171,27 @@ static void spin_until(uint64_t until)
  * later each frame: at 370 fps Conker's vCPU idled waiting for it. */
 static volatile uint32_t g_flip_waits;
 
-#ifndef _WIN32
+#if defined(__APPLE__)
+/* macOS: WaitOnAddress / WakeByAddressAll on the kernel's ulocks (what
+ * libc++'s atomic waits use; os_sync_wait_on_address is 14.4's) */
+extern int __ulock_wait(uint32_t op, void *addr, uint64_t value, uint32_t timeout_us);
+extern int __ulock_wake(uint32_t op, void *addr, uint64_t wake_value);
+#define NC_UL_COMPARE_AND_WAIT 1u
+#define NC_ULF_WAKE_ALL 0x100u
+#define NC_ULF_NO_ERRNO 0x1000000u
+
+static void WakeByAddressAll(void *p)
+{
+    __ulock_wake(NC_UL_COMPARE_AND_WAIT | NC_ULF_WAKE_ALL | NC_ULF_NO_ERRNO, p, 0);
+}
+
+static void WaitOnAddress(volatile void *p, void *expected, size_t n, unsigned ms)
+{
+    (void)n;
+    __ulock_wait(NC_UL_COMPARE_AND_WAIT | NC_ULF_NO_ERRNO, (void *)p, *(uint32_t *)expected,
+                 ms ? ms * 1000u : 1u);
+}
+#elif !defined(_WIN32)
 /* Linux: WaitOnAddress / WakeByAddressAll as futexes */
 static void WakeByAddressAll(void *p)
 {

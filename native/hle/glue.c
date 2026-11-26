@@ -221,7 +221,11 @@ static void smp_setup(void)
 #else
 static void smp_signal(int sig, siginfo_t *si, void *uc)
 {
+#ifdef __APPLE__
+    const uintptr_t pc = (uintptr_t)((ucontext_t *)uc)->uc_mcontext->__ss.__rip;
+#else
     const uintptr_t pc = (uintptr_t)((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP];
+#endif
     uint32_t eip;
     uint32_t v;
     if (g_nc_idle_waiting) {

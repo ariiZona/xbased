@@ -13,7 +13,7 @@
 #include <string.h>
 #ifdef _WIN32
 #include "nc_win_net.h"
-#else
+#elif !defined(__APPLE__) /* macOS: nc_eventfd (nc_macos_posix.h) */
 #include <sys/eventfd.h>
 #endif
 #include <time.h>
@@ -220,7 +220,7 @@ void nc_net_send(const uint8_t *frame, size_t len)
     pthread_mutex_unlock(&g_net.lock);
     if (ok) {
         const uint64_t one = 1;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
         (void)one;
         nc_eventfd_write(g_net.wake_fd);
 #else
@@ -315,7 +315,7 @@ static void *net_thread(void *arg)
             continue;
         }
         if (fds[0].revents & POLLIN) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
             nc_eventfd_read(g_net.wake_fd);
 #else
             uint64_t v;
@@ -376,7 +376,7 @@ void nc_net_start(void)
         nc_log("xbased-native-net", "network off: the NIC has no link");
         return;
     }
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     g_net.wake_fd = nc_eventfd();
 #else
     g_net.wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);

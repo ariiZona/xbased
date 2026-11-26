@@ -1,5 +1,5 @@
 /*
- * xbased on Linux x86-64: the few Windows APIs the x86-64 translator and
+ * xbased on Linux and macOS x86-64: the few Windows APIs the x86-64 translator and
  * its instruction emulator use (cpu/cpu_x86.cpp, cpu/x64emu.cpp,
  * core/fault_win.c), over POSIX. Memory: mmap/mprotect; vectored exception
  * handlers: one SIGSEGV/SIGBUS handler (seh.c) that hands them a CONTEXT
@@ -143,7 +143,11 @@ static inline SIZE_T VirtualQuery(LPCVOID addr, MEMORY_BASIC_INFORMATION *mbi, S
     void *page = (void *)((uintptr_t)addr & ~(uintptr_t)0xFFF);
     mbi->BaseAddress = page;
     mbi->RegionSize = 0x1000;
+#ifdef __APPLE__
+    mbi->State = mincore(page, 0x1000, (char *)&v) == 0 ? MEM_COMMIT : 0;
+#else
     mbi->State = mincore(page, 0x1000, &v) == 0 ? MEM_COMMIT : 0;
+#endif
     return sizeof(*mbi);
 }
 
@@ -195,7 +199,13 @@ static inline LONG64 InterlockedIncrement64(volatile LONG64 *v)
 
 static inline DWORD GetCurrentThreadId(void)
 {
+#ifdef __APPLE__
+    uint64_t tid = 0;
+    pthread_threadid_np(NULL, &tid);
+    return (DWORD)tid;
+#else
     return (DWORD)syscall(SYS_gettid);
+#endif
 }
 
 static inline void Sleep(DWORD ms)

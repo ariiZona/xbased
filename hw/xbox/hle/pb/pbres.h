@@ -33,6 +33,16 @@ uint32_t hle_draw_overlay_upload(const uint32_t h5[5], uint32_t *w, uint32_t *h)
  * draws a quad's outline, not the triangles' diagonals) */
 #define HLE_PT_QUADLIST_EDGES  11u
 #define HLE_PT_QUADSTRIP_EDGES 12u
+/* The GPU draws no triangle fans (a portability driver: MoltenVK, Metal has
+ * none): fans and polygons become triangle lists too (vk/vkdev.c sets it). */
+extern bool g_hle_no_fans;
+/* ... and reads vertex attributes only at offsets, and with strides, 4
+ * divides (Metal): misaligned vertices are copied realigned (pb/pbdraw.c
+ * vb_realign, as HLE_QUIRK_VB_ALIGN does for component sizes). */
+extern bool g_hle_vattr_align4;
+/* Whether pt's draws are converted to indices (quads, line loops, quad
+ * edges, and fans and polygons without g_hle_no_fans's fans). */
+bool hle_draw_prim_converted(uint32_t pt);
 uint32_t hle_draw_prim_topology(uint32_t pt);
 uint32_t hle_draw_prim_count(uint32_t pt, uint32_t n);
 void hle_draw_prim_indices(uint32_t pt, const uint16_t *in, uint32_t n, uint32_t base,

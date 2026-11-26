@@ -9,7 +9,10 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <sys/mman.h>
-#ifndef _WIN32
+#if defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/stat.h>
+#elif !defined(_WIN32)
 #include <sys/syscall.h>
 #endif
 #include <unistd.h>
@@ -35,6 +38,26 @@ void nc_vmos_reserve_early(void);
 bool nc_vmos_map(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len);
 bool nc_vmos_unmap(NcVm *vm, uint32_t va, uint32_t len);
 void nc_vmos_protect(NcVm *vm, uint32_t va, uint32_t len, int prot);
+#elif defined(__APPLE__)
+/* no memfd: a POSIX shared memory object, unlinked at once (only the fd
+ * names it) */
+static int memfd(const char *name)
+{
+    char path[64];
+    for (unsigned i = 0; i < 64; i++) {
+        snprintf(path, sizeof(path), "/%s-%d-%u", name, (int)getpid(), i);
+        const int fd = shm_open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) {
+            shm_unlink(path);
+            fcntl(fd, F_SETFD, FD_CLOEXEC);
+            return fd;
+        }
+        if (errno != EEXIST) {
+            break;
+        }
+    }
+    return -1;
+}
 #else
 static int memfd(const char *name)
 {
@@ -75,6 +98,27 @@ bool nc_vm_init(NcVm *vm, uint32_t ram_size)
     }
     vm->ram_size = ram_size;
 #else
+#ifdef __APPLE__
+    /* macOS x86-64: the executable's __XBGUEST segment holds 0x10000 up to
+     * 8 GiB from exec on (cmake/macos.cmake), before libSystem allocates
+     * anything; replaced here by the guest's PROT_NONE reservation and the
+     * empty 4 GiB above it (the Linux case below says why). */
+    extern char nc_macos_guest_space[];
+    if ((uintptr_t)nc_macos_guest_space != 0x10000) {
+        nc_log("xbased-native", "vm: the executable's guest segment is at %p, not 0x10000",
+               (void *)nc_macos_guest_space);
+        return false;
+    }
+    vm->reservation_len = (1ull << 32) - 0x10000;
+    void *r = mmap((void *)0x10000, (2ull << 32) - 0x10000, PROT_NONE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+    if (r != (void *)0x10000) {
+        nc_log("xbased-native", "vm: the guest's address space couldn't be reserved (%s)", strerror(errno));
+        return false;
+    }
+    vm->reservation = r;
+    vm->base = NULL;
+#else
     /* x86-64 (the translator runs guest code at its own addresses): the
      * guest's 4 GiB at host address 0, from 0x10000 (the kernel keeps the
      * first 64 KiB, mmap_min_addr; no title maps there). A PIE executable
@@ -110,6 +154,7 @@ bool nc_vm_init(NcVm *vm, uint32_t ram_size)
         }
         nc_log("xbased-native", "vm: the 4 GiB above the guest's aren't free to keep empty");
     }
+#endif
 
     /* Guest RAM: a memfd, mapped at every address the guest sees it */
     vm->ram_fd = memfd("xbased-ram");

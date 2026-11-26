@@ -70,6 +70,10 @@ typedef struct HleCaps {
     bool x4444;                 /* A4R4G4B4 sampled (VK_EXT_4444_formats, core in 1.3),
                                    else 4444 textures expand to A8R8G8B8 on the way into
                                    the arena (pb/pbres.c) */
+    bool x565, x1555;           /* R5G6B5 / A1R5G5B5 sampled (not on Intel Macs' Metal: MoltenVK),
+                                   else those textures expand to A8R8G8B8 as 4444's do */
+    bool rt565, rt1555;         /* ... and as colour targets, else such a surface isn't
+                                   rendered (vk/surf.c) */
     bool bindless;              /* descriptor indexing (the bindless set, its limits), else
                                    each draw's textures in a set of their own at fixed
                                    places (vk/draw.c fixed_bind) */

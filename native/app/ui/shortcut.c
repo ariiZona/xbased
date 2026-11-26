@@ -106,6 +106,16 @@ bool sc_make(const char *name, const char *game, const char *icon_png, const cha
     return ok;
 }
 
+#elif defined(__APPLE__)
+/* macOS: no shortcut yet (an app bundle per game is the way, once xbased
+ * itself is one); the toast says it failed */
+bool sc_make(const char *name, const char *game, const char *icon_png, const char *icon_ico, char *where,
+             size_t n)
+{
+    (void)name, (void)game, (void)icon_png, (void)icon_ico, (void)where, (void)n;
+    return false;
+}
+
 #else
 #include <sys/stat.h>
 #include <unistd.h>

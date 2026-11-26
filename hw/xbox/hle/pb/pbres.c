@@ -210,6 +210,26 @@ static void expand_4444(const uint16_t *s, size_t n, uint32_t *out)
     }
 }
 
+/* R5G6B5 / A1R5G5B5 / X1R5G5B5 -> A8R8G8B8 (bytes B, G, R, A), each channel's
+ * bits repeated into the low ones, for a GPU without those formats (MoltenVK
+ * on Intel and AMD Macs: HleCaps.x565, x1555 off) */
+static void expand_565(const uint16_t *s, size_t n, uint32_t *out)
+{
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t c = s[i], r = c >> 11, g = (c >> 5) & 0x3F, b = c & 0x1F;
+        out[i] = 0xFF000000u | (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2);
+    }
+}
+
+static void expand_1555(const uint16_t *s, size_t n, bool alpha, uint32_t *out)
+{
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t c = s[i], r = (c >> 10) & 0x1F, g = (c >> 5) & 0x1F, b = c & 0x1F;
+        const uint32_t a = !alpha || (c & 0x8000) ? 0xFF000000u : 0;
+        out[i] = a | (r << 3 | r >> 2) << 16 | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2);
+    }
+}
+
 static uint8_t clip8(int v)
 {
     return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
@@ -345,7 +365,11 @@ static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
     /* R6G5B5 (L6V5U5): no host format, A8R8G8B8 too (hle_tex_expand_r6g5b5), its signed
      * channels as h5[2] says */
     bool r655 = d.fmt == HLE_XFMT_R6G5B5 || d.fmt == HLE_XFMT_LIN_R6G5B5;
-    bool x16 = x4444 || r655;           /* 16-bit texels expanded to 32 */
+    /* R5G6B5, A1R5G5B5, X1R5G5B5 on a GPU without them (MoltenVK): A8R8G8B8 too */
+    bool x565 = (d.fmt == HLE_XFMT_R5G6B5 || d.fmt == HLE_XFMT_LIN_R5G6B5) && !g_hvk.caps.x565;
+    bool a1555 = d.fmt == HLE_XFMT_A1R5G5B5 || d.fmt == HLE_XFMT_LIN_A1R5G5B5;
+    bool x1555 = (a1555 || d.fmt == HLE_XFMT_X1R5G5B5 || d.fmt == HLE_XFMT_LIN_X1R5G5B5) && !g_hvk.caps.x1555;
+    bool x16 = x4444 || r655 || x565 || x1555; /* 16-bit texels expanded to 32 */
     uint32_t oxfmt = p8 || dxtd ? HLE_XFMT_A8R8G8B8 :
                      x16 ? (fi->flags & HLE_FI_LIN ? HLE_XFMT_LIN_A8R8G8B8 : HLE_XFMT_A8R8G8B8) : d.fmt;
     const HleFmtInfo *ofi = hle_fmt_info(oxfmt);
@@ -434,6 +458,10 @@ static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
             }
             if (x4444) {
                 expand_4444((const uint16_t *)t16, (size_t)w * h * dd, (uint32_t *)(dst + pos));
+            } else if (x565) {
+                expand_565((const uint16_t *)t16, (size_t)w * h * dd, (uint32_t *)(dst + pos));
+            } else if (x1555) {
+                expand_1555((const uint16_t *)t16, (size_t)w * h * dd, a1555, (uint32_t *)(dst + pos));
             } else if (r655) {
                 hle_tex_expand_r6g5b5((const uint16_t *)t16, (size_t)w * h * dd, h5[2],
                                       (uint32_t *)(dst + pos));
@@ -532,8 +560,25 @@ enum {
 enum { VT_POINTS = 0, VT_LINES = 1, VT_LINE_STRIP = 2, VT_TRIS = 3, VT_TRI_STRIP = 4,
        VT_TRI_FAN = 5 };
 
+bool g_hle_no_fans;
+bool g_hle_vattr_align4;
+
+static bool fan_converted(uint32_t pt)
+{
+    return g_hle_no_fans && (pt == PT_TRIANGLEFAN || pt == PT_POLYGON);
+}
+
+bool hle_draw_prim_converted(uint32_t pt)
+{
+    return pt == PT_QUADLIST || pt == PT_LINELOOP || pt == PT_QUADLIST_EDGES || pt == PT_QUADSTRIP_EDGES ||
+           fan_converted(pt);
+}
+
 uint32_t hle_draw_prim_topology(uint32_t pt)
 {
+    if (fan_converted(pt)) {
+        return VT_TRIS;
+    }
     switch (pt) {
     case PT_POINTLIST:     return VT_POINTS;
     case PT_LINELIST:
@@ -563,6 +608,9 @@ uint32_t hle_draw_prim_count(uint32_t pt, uint32_t n)
     if (pt == PT_QUADSTRIP_EDGES) {
         return n >= 4 ? (n / 2 - 1) * 8 : 0;
     }
+    if (fan_converted(pt)) {
+        return n >= 3 ? (n - 2) * 3 : 0;
+    }
     return n;
 }
 
@@ -586,6 +634,13 @@ void hle_draw_prim_indices(uint32_t pt, const uint16_t *in, uint32_t n, uint32_t
                 *out++ = IN(v[e]);
                 *out++ = IN(v[(e + 1) & 3]);
             }
+        }
+        return;
+    }
+    if (fan_converted(pt)) {
+        /* fan triangle i: the hub, i + 1, i + 2 (the same winding) */
+        for (uint32_t i = 1; i + 1 < n; i++) {
+            *out++ = IN(0); *out++ = IN(i); *out++ = IN(i + 1);
         }
         return;
     }

@@ -22,6 +22,10 @@
 #define SEP '\\'
 #else
 #include <sys/statvfs.h>
+#ifdef __APPLE__
+#include <sys/mount.h>
+#include <sys/param.h>
+#endif
 #include <unistd.h>
 #define SEP '/'
 #endif
@@ -456,6 +460,28 @@ static void drives(void)
     char sub[160];
     mount_space("/", NULL, sub, sizeof(sub));
     place_add("/", T(S_BR_ROOT), sub, PK_ROOT, 2);
+#ifdef __APPLE__
+    /* macOS: the volumes under /Volumes (disks, USB sticks, discs, shares);
+     * the system's own (/System/Volumes/...) and the root's aliases left out */
+    struct statfs *m = NULL;
+    const int nm = getmntinfo(&m, MNT_NOWAIT);
+    for (int i = 0; i < nm; i++) {
+        const char *mnt = m[i].f_mntonname, *fs = m[i].f_fstypename;
+        if (strncmp(mnt, "/Volumes/", 9) || (m[i].f_flags & MNT_ROOTFS) || access(mnt, R_OK | X_OK) != 0) {
+            continue;
+        }
+        const bool net = !strcmp(fs, "smbfs") || !strcmp(fs, "nfs") || !strcmp(fs, "afpfs") || !strcmp(fs, "webdav");
+        const bool optical = !strcmp(fs, "cd9660") || !strcmp(fs, "udf");
+        const bool usb = !(m[i].f_flags & MNT_LOCAL) ? false : !strcmp(fs, "msdos") || !strcmp(fs, "exfat");
+        if (net) {
+            snprintf(sub, sizeof(sub), "%s  ·  %s", fs, m[i].f_mntfromname);
+        } else {
+            mount_space(mnt, fs, sub, sizeof(sub));
+        }
+        place_add(mnt, base_name(mnt), sub, net ? PK_NETWORK : optical ? PK_OPTICAL : usb ? PK_REMOVABLE : PK_DISK, 2);
+    }
+    return;
+#endif
     /* the disks a desktop mounts (/media, /run/media), the ones mounted by
      * hand (/mnt), and any other real file system that isn't the system's
      * own (/boot, /usr, /var...) */

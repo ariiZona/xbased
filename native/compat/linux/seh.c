@@ -1,5 +1,5 @@
 /*
- * xbased on Linux x86-64: vectored exception handlers (nc_winapi.h) over
+ * xbased on Linux and macOS x86-64: vectored exception handlers (nc_winapi.h) over
  * one SIGSEGV/SIGBUS handler. The signal's ucontext becomes a CONTEXT
  * (Windows' register order and an FXSAVE image), the handlers run in turn,
  * and one that continues execution has its CONTEXT written back. None:
@@ -8,7 +8,7 @@
  * SA_NODEFER: the core leaves a handler by nc_longjmp (fault scopes), and the
  * signal must not stay blocked behind it.
  */
-#ifndef _GNU_SOURCE
+#if !defined(_GNU_SOURCE) && !defined(__APPLE__)
 #define _GNU_SOURCE
 #endif
 #include "nc_winapi.h"
@@ -25,6 +25,39 @@ static int g_n;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct sigaction g_old_segv, g_old_bus;
 static int g_installed;
+
+#ifdef __APPLE__
+/* macOS: the thread state's registers by name; the float state from its
+ * x87 control word on is FXSAVE's image (8 reserved bytes in front). */
+#define NC_UC_FX(uc) ((uint8_t *)&(uc)->uc_mcontext->__fs.__fpu_fcw)
+#define NC_UC_ERR(uc) ((uc)->uc_mcontext->__es.__err)
+#define NC_GREGS(X) X(Rax, rax) X(Rcx, rcx) X(Rdx, rdx) X(Rbx, rbx) X(Rsp, rsp) X(Rbp, rbp) X(Rsi, rsi) X(Rdi, rdi) \
+    X(R8, r8) X(R9, r9) X(R10, r10) X(R11, r11) X(R12, r12) X(R13, r13) X(R14, r14) X(R15, r15) X(Rip, rip)
+
+static void to_context(const ucontext_t *uc, CONTEXT *c)
+{
+    const _STRUCT_X86_THREAD_STATE64 *g = &uc->uc_mcontext->__ss;
+#define X(w, m) c->w = (DWORD64)g->__##m;
+    NC_GREGS(X)
+#undef X
+    c->EFlags = (DWORD)g->__rflags;
+    memcpy(&c->FltSave, NC_UC_FX(uc), 512);
+    c->MxCsr = c->FltSave.MxCsr;
+}
+
+static void from_context(const CONTEXT *c, ucontext_t *uc)
+{
+    _STRUCT_X86_THREAD_STATE64 *g = &uc->uc_mcontext->__ss;
+#define X(w, m) g->__##m = (__uint64_t)c->w;
+    NC_GREGS(X)
+#undef X
+    g->__rflags = (__uint64_t)c->EFlags;
+    /* FXSAVE's 512 bytes; the AVX state behind them (when the kernel saved
+     * one) is left as it was */
+    memcpy(NC_UC_FX(uc), &c->FltSave, 512);
+}
+#else
+#define NC_UC_ERR(uc) ((uc)->uc_mcontext.gregs[REG_ERR])
 
 static void to_context(const ucontext_t *uc, CONTEXT *c)
 {
@@ -81,6 +114,7 @@ static void from_context(const CONTEXT *c, ucontext_t *uc)
         memcpy(uc->uc_mcontext.fpregs, &c->FltSave, 512);
     }
 }
+#endif
 
 static void chain(const struct sigaction *old, int sig, siginfo_t *si, void *uc)
 {
@@ -109,7 +143,7 @@ static void on_signal(int sig, siginfo_t *si, void *ucp)
     er.ExceptionAddress = (PVOID)c.Rip;
     er.NumberParameters = 2;
     /* page fault error code bit 1: a write */
-    er.ExceptionInformation[0] = (uc->uc_mcontext.gregs[REG_ERR] & 2) ? 1 : 0;
+    er.ExceptionInformation[0] = (NC_UC_ERR(uc) & 2) ? 1 : 0;
     er.ExceptionInformation[1] = (ULONG_PTR)si->si_addr;
     EXCEPTION_POINTERS ep = {&er, &c};
     for (int i = 0; i < g_n; i++) {

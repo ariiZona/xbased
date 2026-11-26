@@ -9,6 +9,7 @@
 #include "hw/xbox/hle/hle.h"
 #include "hw/xbox/hle/host.h"
 #include "hw/xbox/hle/vk/vkdev.h"
+#include "hw/xbox/hle/pb/pbres.h"  /* g_hle_no_fans */
 #include "hw/xbox/hle/shader/glsl_compile.h"
 #include "hw/xbox/hle/vk/back.h"
 #include "hw/xbox/hle/vk/batch.h"
@@ -275,8 +276,25 @@ int hle_vk_init(void)
         iexts[nix++] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
     }
 #endif
+    VkInstanceCreateFlags iflags = 0;
+#ifdef __APPLE__
+    /* macOS: MoltenVK is a portability driver; behind the loader it's
+     * listed only when the instance asks for those (SDL may have named the
+     * extension already) */
+    if (has_ext(iext, nie, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+        bool named = false;
+        for (uint32_t i = 0; i < nix; i++) {
+            named |= !strcmp(iexts[i], VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        }
+        if (!named) {
+            iexts[nix++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+        }
+        iflags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
+#endif
     VkInstanceCreateInfo ici = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .flags = iflags,
         .pApplicationInfo = &app,
         .enabledExtensionCount = nix, .ppEnabledExtensionNames = iexts,
     };
@@ -525,6 +543,26 @@ int hle_vk_init(void)
         vkGetPhysicalDeviceFormatProperties(v->phys, VK_FORMAT_A4R4G4B4_UNORM_PACK16, &f4);
         c->x4444 = (f4.optimalTilingFeatures & want) == want;
     }
+    {   /* the 16-bit colour formats: required by Vulkan, missing where Metal
+         * lacks them (MoltenVK on Intel and AMD Macs) */
+        VkFormatProperties fp;
+        const VkFormatFeatureFlags smp = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        const VkFormatFeatureFlags rt = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+        vkGetPhysicalDeviceFormatProperties(v->phys, VK_FORMAT_R5G6B5_UNORM_PACK16, &fp);
+        c->x565 = (fp.optimalTilingFeatures & smp) == smp;
+        c->rt565 = (fp.optimalTilingFeatures & rt) == rt;
+        vkGetPhysicalDeviceFormatProperties(v->phys, VK_FORMAT_A1R5G5B5_UNORM_PACK16, &fp);
+        c->x1555 = (fp.optimalTilingFeatures & smp) == smp;
+        c->rt1555 = (fp.optimalTilingFeatures & rt) == rt;
+        if (!c->x565 || !c->x1555 || !c->rt565 || !c->rt1555) {
+            hle_log("xbased-hle-back", "vk: 16-bit formats: R5G6B5 %s%s, A1R5G5B5 %s%s (textures expand to "
+                    "A8R8G8B8; targets without one aren't rendered)",
+                    c->x565 ? "sampled" : "-", c->rt565 ? "+target" : "", c->x1555 ? "sampled" : "-",
+                    c->rt1555 ? "+target" : "");
+        }
+    }
     c->bc = q.features.textureCompressionBC;
     if (!c->bc) {
         /* the formats themselves, without the feature */
@@ -763,6 +801,19 @@ int hle_vk_init(void)
     if (c->swapchain) {
         exts[nx++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     }
+#ifdef __APPLE__
+    /* a portability driver's (MoltenVK's) device must enable it */
+    if (has_ext(ext, ne, "VK_KHR_portability_subset")) {
+        exts[nx++] = "VK_KHR_portability_subset";
+        /* Metal draws no fans: MoltenVK's triangleFans is false, the
+         * push buffer's fans and polygons go as triangle lists (pb/pbres.c) */
+        g_hle_no_fans = true;
+        /* Metal: vertex attribute offsets and strides multiples of 4 */
+        g_hle_vattr_align4 = true;
+        hle_log("xbased-hle-back", "vk: portability subset: triangle fans drawn as lists, vertex attributes "
+                "realigned to 4 bytes");
+    }
+#endif
 #ifdef _WIN32
     if (c->share) {
         exts[nx++] = VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME;

@@ -17,6 +17,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #define PROPS_MAX_SET 16
 #define PROPS_FILE_MAX (64 * 1024)
@@ -44,12 +47,21 @@ static void props_path(char *out, size_t n)
     exe[len] = 0;
 #else
     char exe[PATH_MAX];
+#ifdef __APPLE__
+    uint32_t sz = sizeof(exe);
+    char raw[PATH_MAX];
+    if (_NSGetExecutablePath(raw, &sz) != 0 || !realpath(raw, exe)) {
+        snprintf(out, n, "props.ini");
+        return;
+    }
+#else
     const ssize_t k = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
     if (k <= 0) {
         snprintf(out, n, "props.ini");
         return;
     }
     exe[k] = 0;
+#endif
     char *slash = strrchr(exe, '/');
     if (slash) {
         slash[1] = 0;

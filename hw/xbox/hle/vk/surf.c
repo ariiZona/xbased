@@ -149,13 +149,14 @@ static VkFormat surf_format(uint32_t xfmt, VkImageAspectFlags *aspect, uint32_t 
     case HLE_XFMT_X8R8G8B8: case HLE_XFMT_LIN_X8R8G8B8:
         *bytes = 4;
         return VK_FORMAT_B8G8R8A8_UNORM;
+    /* (none where Metal lacks them, MoltenVK: such a surface isn't rendered) */
     case HLE_XFMT_R5G6B5: case HLE_XFMT_LIN_R5G6B5:
         *bytes = 2;
-        return VK_FORMAT_R5G6B5_UNORM_PACK16;
+        return g_hvk.caps.rt565 ? VK_FORMAT_R5G6B5_UNORM_PACK16 : VK_FORMAT_UNDEFINED;
     case HLE_XFMT_A1R5G5B5: case HLE_XFMT_LIN_A1R5G5B5:
     case HLE_XFMT_X1R5G5B5: case HLE_XFMT_LIN_X1R5G5B5:
         *bytes = 2;
-        return VK_FORMAT_A1R5G5B5_UNORM_PACK16;
+        return g_hvk.caps.rt1555 ? VK_FORMAT_A1R5G5B5_UNORM_PACK16 : VK_FORMAT_UNDEFINED;
     case HLE_XFMT_L8: case HLE_XFMT_LIN_L8:     /* NV2A B8: the blue channel */
         *bytes = 1;
         return VK_FORMAT_R8_UNORM;

@@ -1,5 +1,5 @@
 /*
- * xbased's PC front end (win_main.c, win_mods.c, win_auto.c) on Linux: the
+ * xbased's PC front end (win_main.c, win_mods.c, win_auto.c) on Linux and macOS: the
  * few Windows calls it makes, over POSIX. On Windows: windows.h.
  */
 #ifndef NATIVE_APP_DESK_H
@@ -37,6 +37,21 @@ typedef void *HANDLE;
 void nc_win_thread_name(const char *name);     /* compat/linux/linux.c */
 void nc_win_thread_priority(int level);
 
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+static inline DWORD GetModuleFileNameA(void *m, char *out, DWORD n)
+{
+    (void)m;
+    char raw[PATH_MAX], real[PATH_MAX];
+    uint32_t sz = sizeof(raw);
+    out[0] = 0;
+    if (_NSGetExecutablePath(raw, &sz) != 0 || !realpath(raw, real) || strlen(real) >= n) {
+        return 0;
+    }
+    snprintf(out, n, "%s", real);
+    return (DWORD)strlen(out);
+}
+#else
 static inline DWORD GetModuleFileNameA(void *m, char *out, DWORD n)
 {
     (void)m;
@@ -44,6 +59,7 @@ static inline DWORD GetModuleFileNameA(void *m, char *out, DWORD n)
     out[k > 0 ? k : 0] = 0;
     return k > 0 ? (DWORD)k : 0;
 }
+#endif
 
 static inline DWORD GetFileAttributesA(const char *p)
 {

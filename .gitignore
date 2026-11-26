@@ -31,4 +31,5 @@ replay_pid*.log
 !/tools/release/
 !/tools/brand/
 !/tools/db/
+!/tools/macos/
 !/tools/fetch_deps.sh

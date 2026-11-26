@@ -1641,8 +1641,54 @@ static void shader_cache_by_version(const char *base)
     nc_log("xbased-app", "shader caches of %s cleared (%s)", seen[0] ? seen : "an earlier version",
            XBASED_VERSION);
 }
+#ifdef __APPLE__
+#include <dlfcn.h>
+/* macOS: Vulkan is a library found at run time, not a system one. A loader
+ * (libvulkan: the SDK's, Homebrew's vulkan-loader) first, for its layers,
+ * else MoltenVK itself; beside the executable first (a package carries
+ * its own), then where Homebrew and the SDK put them. SDL (the window's
+ * surface) and the renderer (volk) are given the same one. */
+static void mac_vulkan(void)
+{
+    char here[MAX_PATH] = "";
+    if (GetModuleFileNameA(NULL, here, sizeof(here))) {
+        char *slash = strrchr(here, '/');
+        if (slash) {
+            slash[1] = 0;
+        }
+    }
+    const char *env = SDL_getenv("SDL_VULKAN_LIBRARY");
+    const char *const names[] = {"libvulkan.1.dylib", "libMoltenVK.dylib"};
+    const char *const dirs[] = {here, "/usr/local/lib/", "/opt/homebrew/lib/"};
+    char path[MAX_PATH + 64];
+    void *lib = NULL;
+    if (env && *env) {
+        snprintf(path, sizeof(path), "%s", env);
+        lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    }
+    for (size_t n = 0; !lib && n < sizeof(names) / sizeof(names[0]); n++) {
+        for (size_t d = 0; !lib && d < sizeof(dirs) / sizeof(dirs[0]); d++) {
+            if (dirs[d][0]) {
+                snprintf(path, sizeof(path), "%s%s", dirs[d], names[n]);
+                lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+            }
+        }
+    }
+    void *gipa = lib ? dlsym(lib, "vkGetInstanceProcAddr") : NULL;
+    if (!gipa) {
+        nc_log("xbased-app", "vulkan: no MoltenVK or Vulkan loader found (brew install molten-vk)");
+        return;
+    }
+    nc_log("xbased-app", "vulkan: %s", path);
+    SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, path);
+    nc_hle_set_vk_loader(gipa);
+}
+#endif
+
 #ifdef _WIN32
 #define NC_PLATFORM_NAME "Windows"
+#elif defined(__APPLE__)
+#define NC_PLATFORM_NAME "macOS"
 #else
 #define NC_PLATFORM_NAME "Linux"
 #endif
@@ -1926,7 +1972,9 @@ int main(int argc, char *argv[])
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS3, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS3_SIXAXIS_DRIVER, "1");
 #endif
-#ifndef _WIN32
+#if defined(__APPLE__)
+    mac_vulkan();
+#elif !defined(_WIN32)
     /* PulseAudio's API first: PipeWire desktops serve it too, and where
      * PipeWire's own is missing (WSLg) SDL waits half a minute on it */
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "pulseaudio,pipewire,alsa");

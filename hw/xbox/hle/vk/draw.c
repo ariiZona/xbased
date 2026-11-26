@@ -274,13 +274,14 @@ static bool tex_format(uint32_t x, TexFmt *o)
         VkComponentMapping m = SW(A, B, G, R);
         o->fmt = VK_FORMAT_R8G8B8A8_UNORM; o->sw = m; return true;
     }
+    /* else the front end sends them as A8R8G8B8 (pb/pbres.c), as 4444's */
     case HLE_XFMT_R5G6B5: case HLE_XFMT_LIN_R5G6B5:
-        o->fmt = VK_FORMAT_R5G6B5_UNORM_PACK16; return true;
+        o->fmt = VK_FORMAT_R5G6B5_UNORM_PACK16; return g_hvk.caps.x565;
     case HLE_XFMT_A1R5G5B5: case HLE_XFMT_LIN_A1R5G5B5:
-        o->fmt = VK_FORMAT_A1R5G5B5_UNORM_PACK16; return true;
+        o->fmt = VK_FORMAT_A1R5G5B5_UNORM_PACK16; return g_hvk.caps.x1555;
     case HLE_XFMT_X1R5G5B5: case HLE_XFMT_LIN_X1R5G5B5:
         o->fmt = VK_FORMAT_A1R5G5B5_UNORM_PACK16; o->sw.a = VK_COMPONENT_SWIZZLE_ONE;
-        return true;
+        return g_hvk.caps.x1555;
     case HLE_XFMT_A4R4G4B4: case HLE_XFMT_LIN_A4R4G4B4:
         /* else the front end sends them as A8R8G8B8 (pb/pbres.c) */
         o->fmt = VK_FORMAT_A4R4G4B4_UNORM_PACK16_EXT; return g_hvk.caps.x4444;
@@ -384,9 +385,37 @@ static void write_image(uint32_t slot, VkImageView view)
     write_slot(slot, view, VK_NULL_HANDLE);
 }
 
+/* Whether the device samples textures of format f at all: a portability
+ * driver (MoltenVK) aborts on an image of a format Metal lacks, where
+ * other drivers only fail the call. Each format asked once. */
+static bool sampled_ok(VkFormat f)
+{
+    static uint8_t known[256];          /* the core formats: 0 not asked, 1 yes, 2 no */
+    if ((unsigned)f < 256 && known[f]) {
+        return known[f] == 1;
+    }
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(g_hvk.phys, f, &fp);
+    const bool ok = fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if ((unsigned)f < 256) {
+        known[f] = ok ? 1 : 2;
+    }
+    if (!ok) {
+        static unsigned s_logged;
+        if (s_logged++ < 8) {
+            hle_log("xbased-hle-back", "texture format %d not sampled by this GPU: not made", (int)f);
+        }
+    }
+    return ok;
+}
+
 static bool make_image(HleVkTex *t, const TexFmt *tf, VkImageUsageFlags usage)
 {
     bool cube = t->faces == 6;
+    if (!sampled_ok(tf->fmt)) {
+        t->img = VK_NULL_HANDLE;
+        return false;
+    }
     VkImageCreateInfo ici = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = t->vol ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D,

@@ -191,12 +191,25 @@ int hle_host_anisotropy(void)
     return g_anisotropy;
 }
 
+#ifdef __APPLE__
+static PFN_vkGetInstanceProcAddr g_mac_gipa;
+
+void nc_hle_set_vk_loader(void *gipa)
+{
+    g_mac_gipa = (PFN_vkGetInstanceProcAddr)gipa;
+}
+#endif
+
 /* The system driver's entry point. */
 void *hle_host_vk_loader(void)
 {
+#ifdef __APPLE__
+    return (void *)g_mac_gipa;      /* nc_hle_set_vk_loader's */
+#else
     static PFN_vkGetInstanceProcAddr gipa;
     /* (desktop: none here, volk finds the system's loader, vulkan-1.dll or libvulkan.so.1) */
     return (void *)gipa;
+#endif
 }
 
 /* The app tells the user and goes back to the library (nc_hle_fatal). */

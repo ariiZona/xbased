@@ -124,7 +124,7 @@ target_link_libraries(xbased_apu PRIVATE nc_zydis)
 # the audio output on SDL3's audio streams (dev/apu/out.c)
 target_link_libraries(xbased_apu PUBLIC xbased_hle SDL3::SDL3)
 
-if(NC_LINUX_X64)
+if(NC_POSIX_X64)
   # the window's Vulkan surface from SDL (vk/swapchain.c)
   target_link_libraries(xbased_hle PUBLIC SDL3::SDL3)
 endif()

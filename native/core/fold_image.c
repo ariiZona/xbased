@@ -15,6 +15,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -322,6 +323,12 @@ static bool fd_dir(int fd, char *out, size_t cap)
         s += 4;
     }
     snprintf(out, cap, "%s", s);
+#elif defined(__APPLE__)
+    char p[PATH_MAX];
+    if (fcntl(fd, F_GETPATH, p) != 0) {
+        return false;
+    }
+    snprintf(out, cap, "%s", p);
 #else
     char link[64];
     snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);

@@ -247,6 +247,14 @@ extern bool g_hle_glsl_zclamp;
 #define HLE_ZCLAMP_GLSL \
     "  if (gl_Position.w > 0.0) gl_Position.z = clamp(gl_Position.z, 0.0, gl_Position.w);\n"
 
+/* The alpha test's operands, a (the given alpha) and r (ALPHAREF), for psh.c's
+ * k_cmp compare: as floats, or with vk/quirks.h HLE_QUIRK_ALPHA_TEST_8BIT
+ * (g_hle_glsl_atest8) as the NV2A's 8-bit values. */
+extern bool g_hle_glsl_atest8;
+#define HLE_ATEST_FLOAT_GLSL(a) "float a = " a ", r = pc.alpha_ref;"
+#define HLE_ATEST_8BIT_GLSL(a) "float a = floor(" a " * 255.0 + 0.5), r = floor(pc.alpha_ref * 255.0 + 0.5);"
+#define HLE_ATEST_GLSL(a) (g_hle_glsl_atest8 ? HLE_ATEST_8BIT_GLSL(a) : HLE_ATEST_FLOAT_GLSL(a))
+
 /* No descriptor indexing (HleCaps.bindless off): a pixel shader's bindless arrays become the draw's own set (vk/draw.c
  * fixed_bind): sized (each stage's images, then the default sampler and each
  * stage's), indexed without nonuniformEXT (the push block's indices, the same

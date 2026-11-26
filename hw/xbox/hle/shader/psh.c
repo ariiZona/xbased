@@ -774,8 +774,7 @@ size_t hle_psh_glsl(const HlePshKey *k, char *buf, size_t cap, unsigned *unsuppo
     final_combiner(&b, k);
     put(&b, "  outc = clamp(outc, 0.0, 1.0);\n");
     if (k->alpha_test && k->alpha_func < 8) {
-        put(&b, "  { float a = outc.a, r = pc.alpha_ref; if (!(%s)) discard; }\n",
-            k_cmp[k->alpha_func]);
+        put(&b, "  { %s if (!(%s)) discard; }\n", HLE_ATEST_GLSL("outc.a"), k_cmp[k->alpha_func]);
     }
     static const char *const k_dbg[17] = {
         "outc", "t0", "v0", "r0", "vec4(vec3(fogf), 1.0)", "v1", "t3", "vec4(vec3(r0.a), 1.0)",

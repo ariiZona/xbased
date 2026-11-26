@@ -38,6 +38,7 @@ static __attribute__((format(printf, 2, 3))) void put(Buf *b, const char *fmt, .
 bool g_hle_push_ssbo;                   /* ff.h */
 bool g_hle_glsl_zclamp;                 /* ff.h */
 bool g_hle_glsl_fixed;                  /* ff.h */
+bool g_hle_glsl_atest8;                 /* ff.h */
 
 size_t hle_glsl_fixed_slots(char *src, size_t cap)
 {
@@ -579,8 +580,7 @@ size_t hle_ff_ps_glsl(const HleFfPsKey *k, char *buf, size_t cap)
         put(&b, "  cur.rgb = mix(unpackUnorm4x8(pc.fog_color).zyx, cur.rgb, fogf);\n");
     }
     if (k->alpha_test && k->alpha_func < 8) {
-        put(&b, "  { float a = cur.a, r = pc.alpha_ref; if (!(%s)) discard; }\n",
-            k_cmp[k->alpha_func]);
+        put(&b, "  { %s if (!(%s)) discard; }\n", HLE_ATEST_GLSL("cur.a"), k_cmp[k->alpha_func]);
     }
     put(&b, "  oColor = %s;\n", k->out_bgra ? "cur.bgra" : "cur");
     if (k->sblend) {

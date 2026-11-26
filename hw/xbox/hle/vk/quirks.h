@@ -44,6 +44,11 @@ enum {
      * (signalled on the CPU), waits for it itself, and its pass waits for
      * nothing (vk/swapchain.c). */
     HLE_QUIRK_ACQUIRE_FENCE = 1u << 3,
+    /* The alpha test compares 8-bit values, both sides rounded to 0..255 as the
+     * NV2A's are, instead of floats (shader/ff.h HLE_ATEST_8BIT_GLSL): an alpha a
+     * hair under 1.0 is 255 on the console and fails LESS 255, but passes a < 1.0.
+     * Read when the back end starts: it changes the shaders. */
+    HLE_QUIRK_ALPHA_TEST_8BIT = 1u << 4,
 };
 
 extern uint32_t g_hle_quirks;

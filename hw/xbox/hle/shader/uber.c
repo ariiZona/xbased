@@ -881,7 +881,7 @@ static const char k_fs_main[] =
     /* the alpha test (psh.c k_cmp) */
     "  if ((pf & 1u) != 0u) {\n"
     "    uint af = (pf >> 1) & 7u;\n"
-    "    float a = outc.a, r = pc.alpha_ref;\n"
+    "    %s\n"
     "    bool ok = af == 1u ? a < r : af == 2u ? a == r : af == 3u ? a <= r : af == 4u ? a > r :\n"
     "              af == 5u ? a != r : af == 6u ? a >= r : af == 7u;\n"
     "    if (!ok) discard;\n"
@@ -900,7 +900,7 @@ size_t hle_uber_fs_glsl(char *buf, size_t cap, unsigned set, unsigned depth, boo
     Buf b = { buf, cap, 0, false };
     put(&b, "#version 450\n#define UB_FULL %d\n", full ? 1 : 0);
     put(&b, k_fs_head, hle_push_glsl(), set, (unsigned)(HLE_UBER_WORDS / 4), wb ? HLE_WBUF_IN_GLSL : "");
-    put(&b, k_fs_main, wb ? HLE_WBUF_CALC_GLSL : "",
+    put(&b, k_fs_main, wb ? HLE_WBUF_CALC_GLSL : "", HLE_ATEST_GLSL("outc.a"),
         wb ? HLE_WBUF_STORE_GLSL :
         depth == 1 ? "  { float zo = uintBitsToFloat(pc.psc[18]) + uintBitsToFloat(pc.psc[19]) *\n"
         "        max(abs(dFdx(gl_FragCoord.z)), abs(dFdy(gl_FragCoord.z))) * 16777215.0;\n"

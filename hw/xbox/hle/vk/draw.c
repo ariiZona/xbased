@@ -770,6 +770,7 @@ int hle_draw_init(void)
     g_hle_push_ssbo = !g_hvk.caps.push;     /* before any shader is made */
     g_hle_glsl_zclamp = !g_hvk.caps.depth_clamp;
     g_hle_glsl_fixed = !g_hvk.caps.bindless;
+    g_hle_glsl_atest8 = hle_quirk(HLE_QUIRK_ALPHA_TEST_8BIT);
     if (g_hle_push_ssbo && !push_ring_init()) {
         hle_log("xbased-hle-back", "push blocks: no storage buffer ring");
         return -1;

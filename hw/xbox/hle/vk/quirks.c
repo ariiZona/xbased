@@ -56,6 +56,13 @@ static const HleQuirk k_quirks[] = {
      * intro (the GPU short of a submitted value, 4 submits pending, no
      * error), that freeze not reproduced since nor tied to it. */
     { HLE_QUIRK_ACQUIRE_FENCE, "acquire_fence", moltenvk },
+    /* MoltenVK 1.4.2 (Radeon Pro 5300M, macOS 15, 2026-11-26): Halo 2's Armory
+     * grate drew its holes grey, black on Windows on the same GPU. Its first pass
+     * alpha-tests LESS 0xff; there the holes' alpha came out under 1.0 and passed.
+     * Compared in 8 bits the holes are discarded (the probe pixels' mean 71/255 to
+     * 3/255), as on Windows. Not the cause: Metal's fast math (mathMode safe: the
+     * same frames), the bindless set, the 4-byte vertex realignment. */
+    { HLE_QUIRK_ALPHA_TEST_8BIT, "alpha_test_8bit", moltenvk },
 };
 
 static uint32_t g_defaults;

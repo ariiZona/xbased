@@ -11,6 +11,18 @@
   went from 50 to 60 fps in the same scene (#435).
 
 ### Fixes
+- Chronicles of Riddick froze a few seconds into a new game, and in some
+  later chapters, on slower graphics cards since 1.2.14. The emulator let a
+  game run further ahead of the graphics card than an Xbox does, and Riddick
+  ended up with more visibility tests waiting than it has room for. Now a
+  game is at most a frame ahead of what the card has drawn, as on the
+  console. A card that keeps up never waits (#435).
+- Blade II: the characters' shadows were pale pink streaks on the street
+  again, since 1.2.0 (#287). When a vertex program writes no fog, the Xbox's
+  graphics chip uses the fog its earlier vertices left (it keeps the last 6),
+  and xbased gave those vertices no fog distance, so the city's haze coloured
+  the shadows. Now they take the fog the earlier vertices left, as on the
+  console.
 - Console language: a game now plays in the language the console is set to
   whenever its disc has it, whatever its language folders are called. Dino
   Crisis 3's European disc (folders en, fr, ge, it, sp) played in English on

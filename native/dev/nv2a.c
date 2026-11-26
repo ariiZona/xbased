@@ -63,6 +63,7 @@
 #define NV_PFIFO_CACHE1_DMA_SUBROUTINE 0x00324Cu
 #define NV_PGRAPH_INTR      0x400100u
 #define NV_PGRAPH_INTR_EN   0x400140u
+#define NV_PGRAPH_STATUS    0x400700u
 #define NV_PGRAPH_SURFACE   0x400710u
 #define NV_PGRAPH_INCREMENT 0x40071Cu
 #define NV_PGRAPH_FIFO      0x400720u
@@ -463,6 +464,11 @@ static uint64_t nv2a_read_reg(uint32_t off, unsigned size)
         case NV_PFB_WBC:
             v = 0; /* no write-combine flush pending (Riddick spins on it) */
             break;
+        case NV_PGRAPH_STATUS:
+            if (g_pbmode && fifo_empty()) {
+                hle_pbd_idle_seen();    /* the guest waited for the GPU */
+            }
+            goto plain;
         default:
             goto plain;
         }

@@ -265,7 +265,7 @@ static void head(Buf *bp, const HleVshKey *k)
     *bp = b;
 }
 
-static void tail(Buf *b, const HleVshKey *k, bool fogw);
+static void tail(Buf *b, const HleVshKey *k, bool fogw, bool carry);
 
 /* the operands an operation reads, as op_expr turns them into GLSL */
 static unsigned op_inputs(const Nv2aVshOperation *o)
@@ -372,7 +372,7 @@ size_t hle_vsh_glsl(const uint32_t *tokens, unsigned nslots, const HleVshKey *k,
     if (!final) {
         return 0;
     }
-    tail(&b, k, fogw);
+    tail(&b, k, fogw, true);
     return b.overflow ? 0 : b.len;
 }
 
@@ -381,13 +381,15 @@ size_t hle_vsh_glsl_wrap(const HleVshKey *k, const char *body, bool fogw, char *
     Buf b = { buf, cap, 0, false };
     head(&b, k);
     put(&b, "%s", body);
-    tail(&b, k, fogw);
+    tail(&b, k, fogw, false);
     return b.overflow ? 0 : b.len;
 }
 
 /* main's end: the outputs from the registers, oPos (screen space) to clip
- * space. fogw: oFog was written. */
-static void tail(Buf *bp, const HleVshKey *k, bool fogw)
+ * space. fogw: oFog was written; carry: a title's program (not the fixed
+ * function's, ffhw.c, whose push block's mvp is its matrix), which takes the
+ * fog left for it when it writes none. */
+static void tail(Buf *bp, const HleVshKey *k, bool fogw, bool carry)
 {
     Buf b = *bp;
     /* specular off (NV2A SPECULAR_ENABLE clear): the pixel stage sees
@@ -399,12 +401,16 @@ static void tail(Buf *bp, const HleVshKey *k, bool fogw)
             "  vBack0 = clamp(oB0, 0.0, 1.0);\n"
             "  vBack1 = %s;\n"
             "  vTex0 = oT0; vTex1 = oT1; vTex2 = oT2; vTex3 = oT3;\n", d1, b1);
-    /* A program that leaves oFog alone is not fogged: Halo draws its Bink
-     * movies with fog enabled through a program writing no oFog, and they
-     * show on the console. Unfogged is factor 1 under FOGTABLEMODE NONE
-     * (vertex fog), distance 0 under the table modes. */
+    /* A program that leaves oFog alone takes the fog the vertex 6 before it
+     * left (the NV2A's last 6 vertices, pb/pbdraw.c g_fogc): the draw's
+     * vertex i's at i mod 6 in the push block's mvp (vk/draw.c), or, nothing
+     * left, unfogged: Halo draws its Bink movies with fog enabled through a
+     * program writing no oFog, and they show on the console (factor 1 under
+     * FOGTABLEMODE NONE, vertex fog, distance 0 under the table modes). */
     if (fogw) {
         put(&b, "  vFog = oFog.x;\n");
+    } else if (carry) {
+        put(&b, "  { int m = gl_VertexIndex %% 6; vFog = pc.mvp[m >> 2][m & 3]; }\n");
     } else {
         put(&b, "  vFog = %s;\n", k->fog_table ? "0.0" : "1.0");
     }

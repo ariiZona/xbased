@@ -323,6 +323,10 @@ typedef struct HleCmdDraw {
     uint32_t restart;           /* 1: strips joined in the indices, 0xFFFF between them
                                    (drawn with primitive restart; pb/pbdraw.c joins
                                    draws back to back) */
+    uint32_t fog_carry_on;      /* a program draw: fog_carry holds what its vertices find */
+    float fog_carry[6];         /* the fog (oFog.x) the draw's vertex i finds left for it, at
+                                   i mod 6 (the vertex 6 before it, pb/pbdraw.c g_fogc), for
+                                   a program writing no oFog; NaN: nothing left yet */
 } HleCmdDraw;
 
 #define HLE_DRAW_NO_UBO   0xFFFFFFFFu

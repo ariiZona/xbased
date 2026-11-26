@@ -216,6 +216,7 @@ static struct {
     unsigned nzr;
     uint32_t next_id;
     uint64_t clears, swaps;             /* swaps: FLIP_INCREMENT_WRITE's */
+    uint64_t swap_value;                /* the last frame shown's submission (frame_behind) */
     uint32_t swap_ids;                  /* every swap's id (those and PCRTC_START's) */
     uint64_t swaps_seen;                /* swaps at the last PCRTC_START */
     uint64_t pcrtc_presents;
@@ -327,6 +328,7 @@ static void coh_take(PbObj *o, uint32_t len);
 static void coh_pend_wait(uint32_t pa, uint32_t len);
 static void coh_pend_wait_inplace(uint32_t pa, uint32_t len);
 static void coh_wait(uint64_t v);
+static void frame_behind(uint64_t value);
 static uint64_t coh_land(PbObj *o);
 static void obj_owns(PbObj *o);
 static void coh_serve(void);
@@ -1837,6 +1839,7 @@ static void swap(void)
     g_pd.shown_written = fo ? fo->written : 0;
     HleCmdSwap *c = begin(HLE_OP_SWAP, sizeof(*c));
     c->value = hle_fe_next_value();
+    const uint64_t frame_value = c->value;
     c->swap_id = ++g_pd.swap_ids;
     shown_part(fo, ax, ay, &c->src_w, &c->src_h);
     g_pd.swaps++;
@@ -1858,6 +1861,7 @@ static void swap(void)
     }
     g_pd.swap_wseq = g_pd.wseq;
     __atomic_store_n(&g_pd.ahead_pa, 0, __ATOMIC_RELEASE);
+    frame_behind(frame_value);
 }
 
 void hle_pbd_trap(void)
@@ -1918,7 +1922,9 @@ static void present_now(uint32_t id)
     g_pd.shown_written = o ? o->written : 0;
     HleCmdSwap *c = begin(HLE_OP_SWAP, sizeof(*c));
     c->value = hle_fe_next_value();
+    const uint64_t frame_value = c->value;
     c->swap_id = ++g_pd.swap_ids;
+    const uint32_t swap_id = c->swap_id;
     c->surf = id;
     c->dump_off = HLE_SWAP_NO_DUMP;
     shown_part(o, ax, ay, &c->src_w, &c->src_h);
@@ -1927,9 +1933,10 @@ static void present_now(uint32_t id)
     hle_fe_commit();
     g_pd.kick_ns = hle_now_ns();
     g_pd.vis_unsent = false;
-    hle_disp_present(c->swap_id);           /* applies once the back end writes it */
+    hle_disp_present(swap_id);              /* applies once the back end writes it */
     fps_log();
     g_pd.epoch++;
+    frame_behind(frame_value);
 }
 
 bool hle_pbd_flip_due(void)
@@ -4041,6 +4048,224 @@ static void carry_latch(uint32_t last, const uint32_t *inl)
  * textures, the constants (a program's, or the fixed-function stage's from
  * its methods) and the attributes' current values after them, the state
  * and the vertex shader; emitted. */
+/*
+ * The fog a program's vertices leave. The NV2A keeps the outputs of its last
+ * 6 vertices, a place each in turn across draws, and a vertex of a program
+ * that writes no oFog finds the fog the one 6 before it left
+ * (nxdk_pgraph_tests' Fog_carryover, on the console: CarryoverVertexSlots'
+ * 6th and 12th points fogged whatever came before them; the fixed-function
+ * stage's vertices are not counted, and once the GPU has gone idle the next
+ * vertex takes the first place: CarryoverNopDraw). Blade II draws its
+ * characters' shadows through a program writing no oFog with fog on: given
+ * the fog of no distance, its haze turned them its fog colour, pale pink
+ * streaks over the street, where the console gives them the fog the
+ * characters' own vertices left (xemu's issues name Hunter: The Reckoning
+ * Redeemer's shadows and FIFA's menus too). Kept from the first draw that
+ * needs it (a program writing no oFog, fog on), nothing run before: a
+ * draw's last 6 vertices run on the CPU, those of a draw of 6 or more once a
+ * draw needs the places or the program changes (its inputs and constants
+ * kept till then). Programs are parsed once, by their hash: parsed at each
+ * change, 007 Everything or Nothing's (hundreds a frame) cost it 3 % uncapped.
+ */
+#define FOGC_PROGS 64
+static struct {
+    bool on;
+    float ring[6];                      /* the places' oFog.x (NaN: nothing left yet) */
+    uint32_t next;                      /* the place the next program vertex takes */
+    uint64_t cur;                       /* the program of the draw being decoded (emit) */
+    struct {
+        uint64_t h;                     /* its hash (program()), 0: none */
+        bool ok, writes;                /* writes: it writes oFog */
+        Nv2aVshProgram prog;
+    } p[FOGC_PROGS];
+    bool pending;                       /* a draw's last 6 vertices still to run (fogc_run) */
+    unsigned pend_prog;                 /* ... with this program (p) */
+    uint32_t pend_base;                 /* the place the first of them takes */
+    float in[6][ATTRS][4];
+    uint32_t consts[HLE_VSH_CONSTANTS][4];
+} g_fogc;
+static bool g_fogc_idle;                /* hle_pbd_idle_seen since the last program draw */
+
+void hle_pbd_idle_seen(void)
+{
+    if (!__atomic_load_n(&g_fogc_idle, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&g_fogc_idle, true, __ATOMIC_RELEASE);
+    }
+}
+
+/* vertex p's inputs: the arrays' (the inline array's, vsize bytes a vertex,
+ * or the immediate vertices'), the rest the current values */
+static void fogc_inputs(uint32_t p, uint32_t vsize, float in[ATTRS][4])
+{
+    memcpy(in, g_pd.cur, sizeof(g_pd.cur));
+    if (g_pd.nimm) {
+        memcpy(in, g_pd.imm + (size_t)p * ATTRS * 4, sizeof(g_pd.cur));
+        return;
+    }
+    uint32_t off = 0;
+    for (unsigned a = 0; a < ATTRS; a++) {
+        const uint32_t fmt = R(NV097_SET_VERTEX_DATA_ARRAY_FORMAT + 4 * a);
+        if (!((fmt >> 4) & 0xF)) {
+            continue;
+        }
+        const uint32_t nb = hle_vimm_element_bytes(fmt & 0xFF);
+        const uint8_t *src = NULL;
+        if (g_pd.ninl) {
+            src = (const uint8_t *)g_pd.inl + (size_t)p * vsize + off;
+            off += (attr_bytes(fmt) + 3) & ~3u;
+        } else {
+            const uint64_t pa = (uint64_t)(R(NV097_SET_VERTEX_DATA_ARRAY_OFFSET + 4 * a) & 0x7FFFFFFFu) +
+                                (uint64_t)(fmt >> 8) * g_pd.idx[p];
+            src = nb && pa < hle_ram_size() ? hle_pa_ptr((uint32_t)pa, nb) : NULL;
+        }
+        if (nb && src) {
+            hle_vimm_element(fmt & 0xFF, src, in[a]);
+        }
+    }
+}
+
+/* program prog run for one vertex: the place's oFog.x what it leaves */
+static void fogc_exec(const Nv2aVshProgram *prog, float in[ATTRS][4], const uint32_t consts[HLE_VSH_CONSTANTS][4],
+                      float *place)
+{
+    static Nv2aVshCPUFullExecutionState es;
+    _Static_assert(sizeof(es.context_regs) == sizeof(g_pd.consts), "constants");
+    _Static_assert(sizeof(es.input_regs) == sizeof(g_pd.cur), "attributes");
+    Nv2aVshExecutionState st = nv2a_vsh_emu_initialize_full_execution_state(&es);
+    memcpy(es.input_regs, in, sizeof(es.input_regs));
+    memcpy(es.context_regs, consts, sizeof(es.context_regs));
+    for (unsigned o = 0; o < 13; o++) {
+        es.output_regs[4 * o + 0] = es.output_regs[4 * o + 1] = es.output_regs[4 * o + 2] = 0.0f;
+        es.output_regs[4 * o + 3] = 1.0f;
+    }
+    es.output_regs[4 * NV2AOR_FOG_COORD] = isnan(*place) ? 0.0f : *place;
+    nv2a_vsh_emu_execute(&st, (Nv2aVshProgram *)prog);
+    *place = es.output_regs[4 * NV2AOR_FOG_COORD];
+}
+
+/* the kept vertices run (a later draw needs the places, or their program goes) */
+static void fogc_run(void)
+{
+    if (!g_fogc.pending) {
+        return;
+    }
+    g_fogc.pending = false;
+    const unsigned i = g_fogc.pend_prog;
+    for (unsigned v = 0; g_fogc.p[i].ok && v < 6; v++) {
+        fogc_exec(&g_fogc.p[i].prog, g_fogc.in[v], (const uint32_t (*)[4])g_fogc.consts,
+                  &g_fogc.ring[(g_fogc.pend_base + v) % 6]);
+    }
+}
+
+/* program h (the one at SET_TRANSFORM_PROGRAM_START) parsed, once: its slot */
+static unsigned fogc_prog(uint64_t h)
+{
+    const unsigned i = (unsigned)((h ^ (h >> 29)) % FOGC_PROGS);
+    if (h && g_fogc.p[i].h == h) {
+        return i;
+    }
+    if (g_fogc.pending && g_fogc.pend_prog == i) {
+        fogc_run();                             /* (the kept vertices are its) */
+    }
+    if (g_fogc.p[i].ok) {
+        nv2a_vsh_program_destroy(&g_fogc.p[i].prog);
+    }
+    const uint32_t start = R(NV097_SET_TRANSFORM_PROGRAM_START);
+    uint32_t ns = 0;
+    while (start + ns < HLE_VSH_MAX_SLOTS && !(g_pd.pmem[start + ns++][3] & 1)) {
+    }
+    bool ok = start < HLE_VSH_MAX_SLOTS &&
+              nv2a_vsh_parse_program(&g_fogc.p[i].prog, g_pd.pmem[start], ns) == NV2AVPR_SUCCESS;
+    bool writes = false;
+    for (uint32_t s = 0; ok && s < ns; s++) {
+        const Nv2aVshStep *st = &g_fogc.p[i].prog.steps[s];
+        for (unsigned o = 0; o < 2; o++) {
+            writes |= (st->mac.outputs[o].type == NV2ART_OUTPUT && st->mac.outputs[o].index == NV2AOR_FOG_COORD) ||
+                      (st->ilu.outputs[o].type == NV2ART_OUTPUT && st->ilu.outputs[o].index == NV2AOR_FOG_COORD);
+        }
+        if (st->is_final) {
+            break;
+        }
+    }
+    g_fogc.p[i].ok = ok;
+    g_fogc.p[i].writes = writes;
+    g_fogc.p[i].h = h;
+    return i;
+}
+
+/* A program draw's (emit, d->vsh its program): what its vertices find left,
+ * once a draw needs it (a program writing no oFog, fog on), the places from
+ * the vertex it starts at */
+static void fogc_emit(HleCmdDraw *d)
+{
+    g_fogc.cur = d->vsh;
+    if (__atomic_exchange_n(&g_fogc_idle, false, __ATOMIC_ACQ_REL)) {
+        g_fogc.next = 0;
+    }
+    if (!g_fogc.on) {
+        if (!R(0x02A4)) {                       /* SET_FOG_ENABLE */
+            return;
+        }
+        const unsigned i = fogc_prog(d->vsh);
+        if (!g_fogc.p[i].ok || g_fogc.p[i].writes) {
+            return;
+        }
+        g_fogc.on = true;
+        for (unsigned j = 0; j < 6; j++) {
+            g_fogc.ring[j] = __builtin_nanf("");
+        }
+        hle_log("xbased-hle-pb", "fog carry-over kept from now on: a program writing no oFog draws with fog on");
+    }
+    if (!R(0x02A4)) {
+        return;                                 /* fog off: nothing it finds is read */
+    }
+    const unsigned i = fogc_prog(d->vsh);
+    if (g_fogc.p[i].ok && !g_fogc.p[i].writes) {
+        fogc_run();
+        d->fog_carry_on = 1;
+        for (unsigned j = 0; j < 6; j++) {
+            d->fog_carry[j] = g_fogc.ring[(g_fogc.next + j) % 6];
+        }
+    }
+}
+
+/* A program's draw done (draw_prim): its vertices (the joins' separators
+ * not), the places its last 6 take; vsize: an inline array's vertex bytes */
+static void fogc_after(uint32_t n, uint32_t vsize)
+{
+    uint32_t pos[6], np = 0, nv = 0;
+    for (uint32_t i = n; i-- > 0;) {
+        if (!g_pd.nimm && !g_pd.ninl && g_pd.idx[i] == JOIN_SEP) {
+            continue;
+        }
+        if (np < 6) {
+            pos[np++] = i;                      /* the last first */
+        }
+        nv++;
+    }
+    if (g_fogc.on) {
+        const unsigned i = fogc_prog(g_fogc.cur);
+        if (g_fogc.p[i].ok && g_fogc.p[i].writes && np == 6) {
+            g_fogc.pending = true;              /* every place new: what was kept goes */
+            g_fogc.pend_prog = i;
+            g_fogc.pend_base = (g_fogc.next + nv - 6) % 6;
+            for (unsigned v = 0; v < 6; v++) {
+                fogc_inputs(pos[5 - v], vsize, g_fogc.in[v]);
+            }
+            memcpy(g_fogc.consts, g_pd.consts, sizeof(g_pd.consts));
+        } else if (g_fogc.p[i].ok && g_fogc.p[i].writes) {
+            fogc_run();
+            for (unsigned v = 0; v < np; v++) {
+                float in[ATTRS][4];
+                fogc_inputs(pos[np - 1 - v], vsize, in);
+                fogc_exec(&g_fogc.p[i].prog, in, (const uint32_t (*)[4])g_pd.consts,
+                          &g_fogc.ring[(g_fogc.next + nv - np + v) % 6]);
+            }
+        }
+    }
+    g_fogc.next = (g_fogc.next + nv) % 6;
+}
+
 static void emit(HleCmdDraw *d)
 {
     const bool ff = (R(NV097_SET_TRANSFORM_EXECUTION_MODE) & 3) != 2;
@@ -4155,6 +4380,10 @@ static void emit(HleCmdDraw *d)
     state();
     uint32_t zf = (R(NV097_SET_SURFACE_FORMAT) >> 4) & 0xF;
     d->vsh = ff ? ff_program() : prog;
+    d->fog_carry_on = 0;
+    if (!ff) {
+        fogc_emit(d);
+    }
     d->consts_off = c_off;
     /* the integer formats' 2^-n, the shaders adding the rest (HLE_ZNORM_GLSL);
      * a float format's own (zfloat_scale) */
@@ -4708,22 +4937,27 @@ static void draw_prim(void)
     }
     rt_first_land(false);
     hle_draw_arena_hold(true);
+    uint32_t n = 0, vsize = 0;
     if (g_pd.nimm) {
         draw_imm();                         /* (its vertices were the current values) */
+        n = g_pd.nimm;
     } else if (g_pd.ninl) {
         draw_inline();
-        uint32_t vsize = 0;
         for (unsigned a = 0; a < ATTRS; a++) {
             const uint32_t fmt = R(NV097_SET_VERTEX_DATA_ARRAY_FORMAT + 4 * a);
             vsize += (fmt >> 4) & 0xF ? (attr_bytes(fmt) + 3) & ~3u : 0;
         }
-        const uint32_t n = vsize ? g_pd.ninl * 4 / vsize : 0;
+        n = vsize ? g_pd.ninl * 4 / vsize : 0;
         if (n) {
             carry_latch(0, g_pd.inl + (size_t)(n - 1) * vsize / 4);
         }
     } else {
         draw_arrays();
         carry_latch(g_pd.idx[g_pd.nidx - 1], NULL);
+        n = g_pd.nidx;
+    }
+    if ((R(NV097_SET_TRANSFORM_EXECUTION_MODE) & 3) == 2) {
+        fogc_after(n, vsize);
     }
     hle_draw_arena_hold(false);
 }
@@ -5426,6 +5660,31 @@ static void coh_wait(uint64_t v)
     }
     g_coh.waits++;
     hle_tl_wait(v);
+}
+
+/*
+ * A frame shown (its swap, or a display start for a title that flips without
+ * one) and its submission sent: the GPU's work for the frame before is
+ * waited for, the decoder (so the push buffer's GET, and the guest) at most
+ * a frame ahead of what the GPU has drawn. On the console the push buffer
+ * holds two swaps at most and a third waits until the GPU has handled one
+ * (the XDK's Swap: BlockOnFence): the CPU never more than a few frames ahead
+ * of the pictures drawn. The decoder takes a frame at once, and the GPU of
+ * the PC fell behind it by as many frames as the upload arena held, more
+ * since a frame takes less of it (#429): Riddick keeps the visibility tests
+ * it waits on in a table, and on a GTX 1050 at 2x or an RX 580 at 1x more
+ * were waiting than it holds a few seconds into a new game, the next test's
+ * index read past it and the title stopped on its write (#435; at 8x here
+ * every run of nine, with the arena at 32 MiB one of two, none of three
+ * since). A GPU keeping up has the frame before long done: no wait.
+ */
+static void frame_behind(uint64_t value)
+{
+    const uint64_t prev = g_pd.swap_value;
+    g_pd.swap_value = value;
+    if (prev && prev <= hle_fe_last_value() && hle_tl_completed() < prev) {
+        hle_tl_wait(prev);
+    }
 }
 
 /* A free landing slot, the oldest landing in flight waited for if none

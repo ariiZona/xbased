@@ -130,20 +130,27 @@ static void test_stops_at_final(void)
     HT_CHECK(strstr(buf, "slot 8") == NULL);
 }
 
-/* a program writing no oFog is not fogged: factor 1 under FOGTABLEMODE
- * NONE, distance 0 under the table modes (Halo's Bink movie quad) */
+/* a program writing no oFog takes the fog the vertex 6 before it left, by
+ * its index from the push block (vk/draw.c puts what was left there, or
+ * unfogged: factor 1 under FOGTABLEMODE NONE, distance 0 under the table
+ * modes, Halo's Bink movie quad), whatever the fog mode; a program writing
+ * oFog its own */
 static void test_unwritten_fog(void)
 {
     uint32_t t[NSLOTS][4];
     memcpy(t, k_prog, sizeof(k_prog));
     memset(t[3], 0, sizeof(t[3]));              /* RCP oFog -> NOP */
     HleVshKey k = { .in_mask = 1 };
+    const char *carry = "{ int m = gl_VertexIndex % 6; vFog = pc.mvp[m >> 2][m & 3]; }";
     HT_CHECK(hle_vsh_glsl(&t[0][0], NSLOTS, &k, buf, sizeof(buf)) > 0);
-    HT_CHECK(strstr(buf, "vFog = 1.0;") != NULL);
+    HT_CHECK(strstr(buf, carry) != NULL);
     HT_CHECK(strstr(buf, "oFog.x =") == NULL);
     k.fog_table = 1;
     HT_CHECK(hle_vsh_glsl(&t[0][0], NSLOTS, &k, buf, sizeof(buf)) > 0);
-    HT_CHECK(strstr(buf, "vFog = 0.0;") != NULL);
+    HT_CHECK(strstr(buf, carry) != NULL);
+    memcpy(t, k_prog, sizeof(k_prog));
+    HT_CHECK(hle_vsh_glsl(&t[0][0], NSLOTS, &k, buf, sizeof(buf)) > 0);
+    HT_CHECK(strstr(buf, "vFog = oFog.x;") != NULL && strstr(buf, carry) == NULL);
 }
 
 /* a buffer too small fails instead of truncating */

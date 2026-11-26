@@ -121,6 +121,10 @@ bool hle_pbd_vis_report(uint32_t pa);
 /* Decode thread: the push buffer is consumed up to PUT (or stalled): reports
  * still unsubmitted go to the GPU now, kept memory goes back (hle_pbd_keep). */
 void hle_pbd_idle(void);
+/* Any thread: the guest saw the GPU idle (NV_PGRAPH_STATUS read, the FIFO
+ * consumed to PUT): the next program vertex takes the first of the places
+ * its fog is left in (pbdraw.c g_fogc). */
+void hle_pbd_idle_seen(void);
 /* The decoder stalled (on a flip, a trap or a closed FIFO): the memory a title
  * keeps for the next one written back now, as hle_pbd_idle would once idle
  * (the title rebooting waits on it; stalled, the decoder is not getting there) */

@@ -5371,6 +5371,26 @@ void hle_draw_cmd_draw(const HleCmdDraw *c, VkCommandBuffer cb, uint32_t rt_id, 
         k.vk.flat = s->rs[RS_SHADEMODE] == 0x1D00;
         k.vk.spec_off = !s->spec;
         k.vk.fog_table = s->rs[RS_FOGENABLE] && (s->rs[RS_FOGTABLEMODE] & 3) != 0;
+        /* the fog a vertex of a program writing no oFog finds left (vsh.c tail:
+         * by gl_VertexIndex mod 6, the draw's vertex i the first vertex + i):
+         * its vertex i's at i mod 6 (pb/pbdraw.c g_fogc), in mvp[0 .. 5], which
+         * a program's shaders don't read; nothing left, unfogged (factor 1,
+         * distance 0 under the table modes) */
+        uint32_t vf = 0;
+        if (c->fog_carry_on && c->nbind && !(g_norec & 2)) {
+            uint32_t st[HLE_DRAW_MAX_BIND];
+            VkDeviceSize of[HLE_DRAW_MAX_BIND];
+            const uint32_t nb = MIN(c->nbind, (uint32_t)HLE_DRAW_MAX_BIND);
+            for (uint32_t i = 0; i < nb; i++) {
+                st[i] = c->bind_stride[i];
+                of[i] = c->bind_off[i];
+            }
+            vf = first_vertex(nb, st, of);
+        }
+        for (unsigned m = 0; m < 6; m++) {
+            const float f = c->fog_carry_on ? c->fog_carry[(m + 6 - vf % 6) % 6] : NAN;
+            pc.mvp[m] = isnan(f) ? (k.vk.fog_table ? 0.0f : 1.0f) : f;
+        }
     }
     if (!s->psh) {
         k.ps.alpha_test = s->rs[RS_ALPHATESTENABLE] != 0;

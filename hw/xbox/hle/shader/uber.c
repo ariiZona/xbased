@@ -306,6 +306,8 @@ size_t hle_uber_vs_glsl(char *buf, size_t cap, unsigned set)
     put(&b, k_vs_head, set, (unsigned)(HLE_UBER_WORDS / 4));
     put(&b, "%s", k_vs_main);
     put(&b, k_vs_prog, (unsigned)HLE_VSH_MAX_SLOTS, (unsigned)HLE_UBER_STEPS_AT, (unsigned)HLE_UBER_STEP_WORDS);
+    /* a program writing no oFog: the fog its vertex finds left (vsh.c tail) */
+    put(&b, "  if (!fogw) { int m = gl_VertexIndex %% 6; O[5].x = pc.mvp[m >> 2][m & 3]; fogw = true; }\n");
     vs_tail(&b);
     return b.overflow ? 0 : b.len;
 }

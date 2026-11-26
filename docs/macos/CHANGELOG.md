@@ -22,6 +22,10 @@ The port's own changes, on top of upstream's releases (its changelog is
   made every texture of the bindless set resident at every draw, and the
   submits held the render thread 360-850 ms of each second (26-30 now).
   The bindless set is off on portability drivers.
+- Halo 2's Armory grate no longer draws its holes grey: on Metal their
+  alpha came out a hair under 1.0 and passed the grate's alpha test
+  (LESS 255) as a float compare. The alpha test compares 8-bit values on
+  MoltenVK, as the NV2A does (quirk `alpha_test_8bit`).
 - Swapchain images are acquired with a fence: MoltenVK 1.4.2 never
   signals an acquire semaphore when no image was free at the acquire, and
   a pass waiting on it would hold Metal's queue for good.

@@ -81,6 +81,7 @@ Each one can be switched for an A/B test:
 | What | Why | Switch |
 |---|---|---|
 | Swapchain images acquired with a fence (quirk `acquire_fence`) | MoltenVK 1.4.2 never signals an acquire semaphore when no image was free | `XBASED_HLE_QUIRKS=-acquire_fence` |
+| The alpha test compares 8-bit values (quirk `alpha_test_8bit`) | On Metal an alpha a hair under 1.0 passed `a < 1.0`, where the NV2A's 255 fails LESS 255: Halo 2's Armory grate drew its holes grey | `XBASED_HLE_QUIRKS=-alpha_test_8bit` |
 | No bindless texture set | MoltenVK makes every texture in a bound set resident at every draw: submits held Halo 2's render thread 360-850 ms of each second at Cairo Station (10-18 fps in combat), 26-30 without it | `XBASED_HLE_MVK_BINDLESS=1` keeps it |
 | Triangle fans drawn as lists | Metal draws no fans | `XBASED_HLE_FANS=1` keeps them |
 | Vertex attributes realigned to 4 bytes | Metal's offsets and strides are multiples of 4 | `XBASED_HLE_NO_VALIGN4=1` |
@@ -91,8 +92,8 @@ The log's start says which are on (`vk: portability subset: ...`,
 
 ## Known problems
 
-- Halo 2: blocky, striped light on some lit metal floors (Cairo Station).
-  Upstream has it on Windows too; whether the unlit case is macOS-only is
-  still open.
+- Halo 2: blocky, striped light on some lit metal floors (Cairo Station,
+  The Armory); upstream has it on Windows too. With the light off, the
+  floor of Cairo Station's weapon-rack room is blocky on macOS only.
 - Loading a savestate restarts xbased, which then draws nothing.
 - Now and then, a guest fault while Halo 2 loads a level.

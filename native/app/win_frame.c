@@ -1688,11 +1688,23 @@ static unsigned children(Display *d, Window f, Window *top)
 }
 
 static Atom g_msg_atom, g_min_atom;
-static volatile int g_toggle, g_quit;
+static volatile int g_toggle, g_quit, g_refocus;
+static Window g_fw;
 
 static bool frame_hook(void *ud, XEvent *e)
 {
     (void)ud;
+    /* The keyboard's focus on the frame itself, not the run's window in it:
+     * a window manager focusing the window it manages (focus following the
+     * mouse, a click) takes it from the run's window. SDL sees no focus
+     * gained, the frame having it already as its inferior's, and the run,
+     * its focus lost, gave the game no keys while its shortcuts, the key
+     * events still its own under the pointer, went on (#445). */
+    if (e->type == FocusIn && e->xfocus.window == g_fw && e->xfocus.mode != NotifyGrab &&
+        (e->xfocus.detail == NotifyAncestor || e->xfocus.detail == NotifyInferior ||
+         e->xfocus.detail == NotifyNonlinear)) {
+        g_refocus = 1;
+    }
     if (e->type == ClientMessage && e->xclient.message_type == g_msg_atom) {
         if (e->xclient.data.l[0] == FRAME_MSG_TOGGLE) {
             g_toggle = 1;
@@ -1736,6 +1748,7 @@ static int frame_run(int wfd, pid_t run, bool fs, bool fs60)
     X.SetErrorHandler(x_errors);
     g_msg_atom = X.InternAtom(d, "_XBASED_FRAME", False);
     g_min_atom = X.InternAtom(d, "_XBASED_MINIMIZED", False);
+    g_fw = fw;
     SDL_SetX11EventHook(frame_hook, NULL);
     if (fs) {
         if (fs60) {
@@ -1802,14 +1815,9 @@ static int frame_run(int wfd, pid_t run, bool fs, bool fs60)
                     }
                     break;
                 }
-                case SDL_EVENT_WINDOW_FOCUS_GAINED: {
-                    Window top = 0;
-                    XWindowAttributes a;
-                    if (children(d, fw, &top) && X.GetWindowAttributes(d, top, &a) && a.map_state == IsViewable) {
-                        X.SetInputFocus(d, top, RevertToParent, CurrentTime);    /* the keyboard to the run */
-                    }
+                case SDL_EVENT_WINDOW_FOCUS_GAINED:
+                    g_refocus = 1;
                     break;
-                }
                 case SDL_EVENT_WINDOW_MINIMIZED:
                 case SDL_EVENT_WINDOW_RESTORED: {
                     const long m = e.type == SDL_EVENT_WINDOW_MINIMIZED;
@@ -1828,6 +1836,16 @@ static int frame_run(int wfd, pid_t run, bool fs, bool fs60)
         if (g_toggle) {
             g_toggle = 0;
             SDL_SetWindowFullscreen(w, !(SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN));
+        }
+        if (g_refocus) {
+            /* the keyboard to the run (its window the topmost child) */
+            g_refocus = 0;
+            Window top = 0;
+            XWindowAttributes a;
+            if (children(d, fw, &top) && X.GetWindowAttributes(d, top, &a) && a.map_state == IsViewable) {
+                X.SetInputFocus(d, top, RevertToParent, CurrentTime);
+                X.Flush(d);
+            }
         }
         int cw = 0, ch = 0;
         SDL_GetWindowSizeInPixels(w, &cw, &ch);

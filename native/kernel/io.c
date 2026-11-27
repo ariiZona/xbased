@@ -803,6 +803,9 @@ static void flush_later(const NcFile *nf)
 static uint32_t g_hdd_gen = 1;
 
 static void io_drain_file(NcKernel *k, unsigned i);
+static int file_partition(const NcFile *nf);
+static void part_used_drop(int part, uint64_t size);
+static void part_used_none(int part);
 
 void nc_io_close(NcKernel *k, uint32_t object)
 {
@@ -825,7 +828,11 @@ void nc_io_close(NcKernel *k, uint32_t object)
             if (o) {
                 o->del = true;                      /* the last handle deletes it */
             } else {
-                unlink(nf->host);
+                struct stat st;
+                const bool had = stat(nf->host, &st) == 0;
+                if (unlink(nf->host) == 0 && had) {
+                    part_used_drop(file_partition(nf), (uint64_t)st.st_size);
+                }
                 g_hdd_gen++;
             }
         }
@@ -1480,6 +1487,29 @@ static bool resolve_name(NcKernel *k, uint32_t root, char *name, size_t cap)
     return true;
 }
 
+/* A disc entry that is an empty file with no extension in its name: the
+ * empty folder an image rebuilt from extracted files (an .xiso) wrote as an
+ * empty file. It is taken for the empty folder it was, as a folder's
+ * attributes, opens and listings answer; a file open (FILE_NON_DIRECTORY_FILE,
+ * what CreateFile asks) still opens the empty file. Marvel vs. Capcom 2's
+ * common .xiso has Media\sounds so: DirectMusic's loader, given it as its
+ * search folder, failed, the game's sound setup stopped before it set up a
+ * lock its main loop takes, and the game hung at a black screen (#431).
+ * Rayman 3's (World\Sound\French and four more) and Need for Speed
+ * Underground's (NIS, MARKERS) are the same; the empty files with an
+ * extension the census of our discs found are files (Loading.ini,
+ * Dummy.txt, logs). */
+static bool disc_lost_folder(const char *name, uint32_t size, uint8_t attr)
+{
+    return !(attr & 0x10) && !size && name[0] && !strchr(name, '.');
+}
+
+static const char *last_name(const char *rel)
+{
+    const char *s = strrchr(rel, '\\');
+    return s ? s + 1 : rel;
+}
+
 /* Opens (and creates) a file for NtCreateFile/NtOpenFile. Returns the status;
  * *info receives the IoStatusBlock information. */
 /* An open whose FILE_DIRECTORY_FILE / FILE_NON_DIRECTORY_FILE doesn't fit
@@ -1551,12 +1581,19 @@ static uint32_t do_open(NcKernel *k, uint32_t access, uint32_t share, uint32_t a
                 char parent[512];
                 snprintf(parent, sizeof(parent), "%.*s", (int)(slash - rel), rel);
                 NcDiscFile pd;
-                path_gone = !nc_disc_find(k->disc, parent, &pd) || !(pd.attr & 0x10);
+                path_gone = !nc_disc_find(k->disc, parent, &pd) ||
+                            !((pd.attr & 0x10) || disc_lost_folder(last_name(parent), pd.size, pd.attr));
             }
             nc_log("xbased-native-io", "open %s: not on the disc%s", path, path_gone ? " (nor its folder)" : "");
             return path_gone ? STATUS_OBJECT_PATH_NOT_FOUND : STATUS_OBJECT_NAME_NOT_FOUND;
         }
-        const bool dir = df.attr & 0x10;
+        const bool lost = disc_lost_folder(last_name(rel), df.size, df.attr);
+        const bool dir = (df.attr & 0x10) || (lost && !(options & FILE_NON_DIRECTORY_FILE));
+        static unsigned lost_logged;
+        if (lost && dir && lost_logged++ < 5) {
+            nc_log("xbased-native-io", "open %s: an empty file with no extension, taken for the empty folder "
+                   "a rebuilt image wrote so", path);
+        }
         if ((options & FILE_DIRECTORY_FILE) && !dir) {
             return dir_mismatch(path, options, STATUS_NOT_A_DIRECTORY);
         }
@@ -2240,6 +2277,7 @@ static uint64_t write_data(NcKernel *k, const uint32_t *a, const uint8_t *src, u
             nc_log("xbased-native-io", "%s formatted (%u-sector clusters): emptied %s", nf->path,
                    g_cluster_sectors[part], nf->host);
             empty_later(nf->host);
+            part_used_none(part);
         }
         return io_finish(k, nf, a, NC_STATUS_SUCCESS, len, true);
     }
@@ -2654,6 +2692,7 @@ static struct {
     uint32_t want;                      /* partitions to scan (bit p) */
     uint64_t used[6], scanned_ns[6];
     uint32_t gen[6];                    /* g_hdd_gen as the scan started */
+    uint32_t formats[6];                /* part_used_none's: a scan begun before one is stale */
     bool valid[6];
 } g_pu = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER};
 
@@ -2670,9 +2709,14 @@ static void *part_scan_thread(void *arg)
         const int part = __builtin_ctz(g_pu.want);
         g_pu.want &= ~(1u << part);
         const uint32_t gen = __atomic_load_n(&g_hdd_gen, __ATOMIC_RELAXED);
+        const uint32_t formats = g_pu.formats[part];
         pthread_mutex_unlock(&g_pu.mu);
         const uint64_t used = partition_used(part, cluster_sectors(part) * 512u);
         pthread_mutex_lock(&g_pu.mu);
+        if (formats != g_pu.formats[part]) {
+            pthread_cond_broadcast(&g_pu.done);
+            continue;                   /* formatted meanwhile: part_used_none's answer stands */
+        }
         g_pu.used[part] = used;
         g_pu.scanned_ns[part] = mono_ns();
         g_pu.gen[part] = gen;
@@ -2719,6 +2763,48 @@ static uint64_t part_used(int part)
     const uint64_t used = g_pu.used[part];
     pthread_mutex_unlock(&g_pu.mu);
     return used;
+}
+
+/* A file of size bytes deleted from a partition: its clusters off the use at
+ * once, not at a later scan's answer. A title that trims its cache until the
+ * drive reports room deletes an entry and asks again (Chase: Hollywood Stunt
+ * Driver's loop at 00081210): with the answer from before the deletes it
+ * deletes every entry, then hands the empty list's head (null) to its delete
+ * and faults. */
+static void part_used_drop(int part, uint64_t size)
+{
+    if (part < 1 || part > 5) {
+        return;
+    }
+    const uint64_t cluster = (uint64_t)cluster_sectors(part) * 512u;
+    const uint64_t bytes = cluster ? (size + cluster - 1) / cluster * cluster : size;
+    pthread_mutex_lock(&g_pu.mu);
+    if (g_pu.valid[part]) {
+        g_pu.used[part] = g_pu.used[part] > bytes ? g_pu.used[part] - bytes : 0;
+    }
+    pthread_mutex_unlock(&g_pu.mu);
+}
+
+/* A partition formatted (its folder emptied, empty_later): nothing used, as
+ * of now. The scan made as the hard disk was set saw what another title had
+ * left on that cache drive, and the answers went on with it after the format:
+ * Chase: Hollywood Stunt Driver, given the drive Halo had filled, formatted it
+ * and was told 736 MiB of its 750 were used; its loading screen's cache trim
+ * then found no entry to delete and faulted (a null read at 00081130). */
+static void part_used_none(int part)
+{
+    if (part < 1 || part > 5) {
+        return;
+    }
+    pthread_mutex_lock(&g_pu.mu);
+    g_pu.used[part] = 0;
+    g_pu.formats[part]++;
+    g_pu.gen[part] = __atomic_load_n(&g_hdd_gen, __ATOMIC_RELAXED);
+    g_pu.scanned_ns[part] = mono_ns();
+    g_pu.valid[part] = true;
+    g_pu.want &= ~(1u << part);
+    pthread_cond_broadcast(&g_pu.done);     /* a query waiting for its first scan */
+    pthread_mutex_unlock(&g_pu.mu);
 }
 
 /* Volume information of the volume a file is on; *len receives the bytes written. */
@@ -2906,7 +2992,7 @@ static bool disc_list_entry(void *ctx, const uint8_t *e)
         }
         memcpy(d->name, name, nlen + 1u);
         d->size = nc_rd32(e + 8);
-        d->dir = e[12] & 0x10;
+        d->dir = (e[12] & 0x10) || disc_lost_folder(name, d->size, e[12]);
     }
     return false;
 }
@@ -3101,6 +3187,9 @@ static uint64_t NtDeleteFile(NcKernel *k, NcFrame *f, const uint32_t *a)
         return NC_STATUS_SUCCESS;
     }
     const uint32_t r = (dir ? rmdir(host) : unlink(host)) == 0 ? NC_STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+    if (r == NC_STATUS_SUCCESS && !dir) {
+        part_used_drop(dev, (uint64_t)st.st_size);
+    }
     nc_log("xbased-native-io", "delete %s: %s (from %08x)", path, r == NC_STATUS_SUCCESS ? "done" : strerror(errno),
            nc_vm_rd32(k->vm, nc_frame_gpr(f, NC_ESP)));
     return r;

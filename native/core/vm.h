@@ -142,6 +142,10 @@ uint32_t nc_vm_alloc_phys_ex(NcVm *vm, uint32_t len, uint32_t lo, uint32_t hi, u
 /* The kernel's own blocks of more than a page: the highest window that holds
  * them, below NC_TOP_RESERVE if they can. */
 uint32_t nc_vm_alloc_phys_high(NcVm *vm, uint32_t len);
+/* A kernel block that is freed again (a large pool block): the smallest free
+ * run that holds it, below the top reserve if it can, else as
+ * nc_vm_alloc_phys_high (virtual pages moved). UINT32_MAX: no room. */
+uint32_t nc_vm_alloc_phys_block(NcVm *vm, uint32_t len);
 
 void nc_vm_free_phys(NcVm *vm, uint32_t pa, uint32_t len);
 

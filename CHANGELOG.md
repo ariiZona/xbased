@@ -1,5 +1,40 @@
 # xbased changelog
 
+## 1.2.16 (2026-11)
+
+### Fixes
+- Psi-Ops: The Mindgate Conspiracy (Europe) went to a black screen after the
+  opening cinematics of a new game, in every language (#444). The game frees
+  its text file as a new game starts and loads it again into a block of the
+  same size, and it keeps using a pointer into the old block, so it needs
+  that block back at the same address. Small blocks the emulator's kernel
+  made in between took that spot. They now fill a gap instead, the block
+  comes back where it was and the game goes on into the first level.
+- Chase: Hollywood Stunt Driver could crash as its first loading screen came
+  up when its cache drive had last been used by another game. After the
+  drive was formatted the emulator still reported the other game's files as
+  using the space, so the game found no room and no file of its own to
+  delete. A format and a deleted file now show in the free space at once.
+- Alter Echo: the movie at the start of a new game stayed on its first
+  frame while its sound played, since 1.2.0 (#197). The movie's picture sits
+  in the memory of an older frame, and the emulator kept the copy it made
+  the first time instead of the frames the game kept writing there.
+- Marvel vs. Capcom 2 stayed on a black screen at start with images rebuilt
+  by some ISO tools (#431). Those tools write an empty folder as an empty
+  file, and the game couldn't open its sound folder. An empty entry with no
+  extension is now taken for the empty folder it was.
+- The library showed old pictures for savestates made during the game you
+  had just played (#439). The pictures are read again when their files
+  change.
+- Cheats that were turned on and later left out of a game's list (made for
+  another release of the game, or turned on in an older version) kept being
+  applied with no way to turn them off (#134). They now stay in the list
+  while they are on, and go away once turned off.
+- Linux: games stopped taking the keyboard after the pointer moved over the
+  window, with window managers that give the focus to the window under the
+  pointer or on a click, while the emulator's shortcuts still worked (#445).
+  The keyboard now goes back to the game's window.
+
 ## 1.2.15 (2026-11)
 
 ### Performance

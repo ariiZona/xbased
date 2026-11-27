@@ -661,12 +661,14 @@ typedef struct {
     char shown[160];                /* the label as the screen says it (cheat_text) */
     int shown_lang;                 /* in that language, -1 not yet */
     int idx, nopts;
-    int rank;                       /* 2 its trainer checks this disc's build, 1 it checks none */
+    int rank;                       /* 2 its trainer checks this disc's build, 1 it checks none,
+                                     * 0 made for another build */
     bool dup;                       /* another trainer's option of the same name comes first */
+    bool left;                      /* a trainer left out (rank): listed only while on */
 } XOpt;
 
 static XOpt g_xopts[256];
-static int g_nxopts;
+static int g_nxopts, g_nxvis;       /* the options, the first g_nxvis the disc's */
 
 static void xcheats_scan(const char *root, const FitXbe *xbe)
 {
@@ -687,12 +689,12 @@ static void xcheats_scan(const char *root, const FitXbe *xbe)
             continue;
         }
         /* one made for another build (another region, another release:
-         * most name theirs) would patch nothing here: left out */
+         * most name theirs) would patch nothing here: left out (rank 0) */
         uint32_t builds[32];
         bool checks = false;
         const int nb = fit_cheat_builds(x.data, x.size, builds, 32, &checks);
         const bool other_build = xbe && !fit_cheat_for_build(x.data, x.size, xbe->time);
-        if (nc_xcheat_for_title(&x, D.cur->g.title_id) && !other_build) {
+        if (nc_xcheat_for_title(&x, D.cur->g.title_id)) {
             for (int o = 0; o < x.nopts && g_nxopts < 256; o++) {
                 XOpt *e = &g_xopts[g_nxopts++];
                 snprintf(e->file, sizeof(e->file), "%s", rel);
@@ -701,8 +703,9 @@ static void xcheats_scan(const char *root, const FitXbe *xbe)
                 e->shown_lang = -1;
                 e->idx = o;
                 e->nopts = x.nopts;
-                e->rank = xbe && nb > 0 ? 2 : 1;
+                e->rank = other_build ? 0 : xbe && nb > 0 ? 2 : 1;
                 e->dup = false;
+                e->left = false;
             }
         }
         nc_xcheat_free(&x);
@@ -725,21 +728,30 @@ static void xcheats_load(void)
         xcheats_scan(cfg_exe_dir(), have ? &xbe : NULL);
     }
     /* the trainers that check this disc's build, when there are any: the
-     * others (that check nothing) may be another release's */
-    int best = 0;
+     * others (that check nothing) may be another release's. The ones left
+     * out come after, listed only while an option of theirs is on: the
+     * game's settings kept it (on another build's page of the same title
+     * and version, another disc of the set, an older version that listed
+     * it) and the game got it, with no row to turn it off (#134). */
+    int best = 1;
     for (int i = 0; i < g_nxopts; i++) {
         best = g_xopts[i].rank > best ? g_xopts[i].rank : best;
     }
-    int k = 0;
+    static XOpt left[256];
+    int k = 0, nl = 0;
     for (int i = 0; i < g_nxopts; i++) {
         if (g_xopts[i].rank == best) {
             g_xopts[k++] = g_xopts[i];
+        } else {
+            left[nl] = g_xopts[i];
+            left[nl++].left = true;
         }
     }
-    g_nxopts = k;
+    g_nxvis = k;
+    memcpy(g_xopts + k, left, sizeof(XOpt) * (size_t)nl);
     /* the trainer with the most options first (then a trainer's revision,
      * "rev"), its options in their order, then the others' */
-    for (int i = 1; i < g_nxopts; i++) {
+    for (int i = 1; i < g_nxvis; i++) {
         for (int j = i; j > 0; j--) {
             const XOpt *a = &g_xopts[j - 1], *b = &g_xopts[j];
             if (!strcmp(a->file, b->file)) {
@@ -756,7 +768,7 @@ static void xcheats_load(void)
         }
     }
     /* an option another trainer already gives (the same name): one row */
-    for (int i = 0; i < g_nxopts; i++) {
+    for (int i = 0; i < g_nxvis; i++) {
         char a[160], b[160];
         cheat_text(g_xopts[i].label, L_EN, a, sizeof(a));
         for (int j = 0; j < i && !g_xopts[i].dup; j++) {
@@ -1117,7 +1129,11 @@ void scr_mods(void)
     }
     /* the mods and patches, then the cheats in a section of their own,
      * their names written properly in the interface's language */
-    bool any_cheat = g_nxopts > 0;
+    bool any_cheat = g_nxvis > 0;
+    for (int i = g_nxvis; i < g_nxopts && !any_cheat; i++) {
+        const char *st = xcheat_states(g_xopts[i].file);
+        any_cheat = g_xopts[i].idx < (int)strlen(st) && st[g_xopts[i].idx] == '1';
+    }
     for (int pass = 0; pass < 2 && !online; pass++) {
         for (int i = 0; i < g_nmods; i++) {
             ModItem *m = &g_mods[i];
@@ -1165,8 +1181,8 @@ void scr_mods(void)
         const char *label = e->shown;
         const char *st = xcheat_states(e->file);
         const bool on = e->idx < (int)strlen(st) && st[e->idx] == '1';
-        if (e->dup && !on) {
-            continue;       /* the first trainer's row gives it (one left on stays, to turn off) */
+        if ((e->dup || e->left) && !on) {
+            continue;       /* the first trainer's row gives it, or it isn't the disc's (one left on stays, to turn off) */
         }
         int delta = 0;
         if (list_row(&l, label, on ? T(S_ON) : T(S_OFF), &delta) || delta) {
@@ -1197,6 +1213,7 @@ void scr_mods(void)
 /* ------------------------------------------------------------ save states */
 
 static UiTex *g_thumb[11];
+static SDL_Time g_thumb_at[11];     /* its picture file's time when it was read (-1: to read) */
 static char g_thumb_key[24];
 static int g_del_slot;
 
@@ -1251,6 +1268,19 @@ void states_forget(void)
     g_thumb_key[0] = 0;
 }
 
+/* a slot's picture file's time (slot<N>.jpg, else .bmp), 0 none */
+static SDL_Time thumb_time(const char *dir, int slot)
+{
+    char p[1200];
+    SDL_PathInfo pi;
+    snprintf(p, sizeof(p), "%s/slot%d.jpg", dir, slot);
+    if (SDL_GetPathInfo(p, &pi)) {
+        return pi.modify_time;
+    }
+    snprintf(p, sizeof(p), "%s/slot%d.bmp", dir, slot);
+    return SDL_GetPathInfo(p, &pi) ? pi.modify_time : 0;
+}
+
 void scr_states(void)
 {
     const float W = ui_w(), H = ui_h();
@@ -1259,13 +1289,23 @@ void scr_states(void)
     states_dir(D.cur, dir, sizeof(dir));
     if (strcmp(g_thumb_key, D.cur->g.key)) {
         for (int i = 0; i < 11; i++) {
+            g_thumb_at[i] = -1;
+        }
+        snprintf(g_thumb_key, sizeof(g_thumb_key), "%s", D.cur->g.key);
+    }
+    /* A slot's picture read again when its file changed: the game runs
+     * apart from the dashboard (a process of its own), and a state it saved
+     * kept the picture the list had read before, another place's (#439) */
+    for (int i = 1; i <= 10; i++) {
+        const SDL_Time at = thumb_time(dir, i);
+        if (at != g_thumb_at[i]) {
             if (g_thumb[i]) {
                 ui_texture_free(g_thumb[i]);
                 g_thumb[i] = NULL;
             }
-            g_thumb[i] = load_thumb(dir, i);
+            g_thumb[i] = at ? load_thumb(dir, i) : NULL;
+            g_thumb_at[i] = at;
         }
-        snprintf(g_thumb_key, sizeof(g_thumb_key), "%s", D.cur->g.key);
     }
     List l;
     list_begin(&l, 74, 150, W * 0.5f - 74, H - 244, 64);

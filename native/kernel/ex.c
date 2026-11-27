@@ -28,7 +28,8 @@
 /* A block of a page or more takes whole pages of its own and gives them back
  * when freed, as the kernel's pool does (MiAllocatePoolPages): in the pool,
  * a large temporary buffer grew it for good, and that memory never went
- * back to the title (JSRF's stage loads ran out of RAM). */
+ * back to the title (JSRF's stage loads ran out of RAM). Its pages fill a
+ * hole (nc_vm_alloc_phys_block), not the top of the highest free run. */
 static uint32_t pool_alloc(NcKernel *k, uint32_t size)
 {
     if (size > k->vm->ram_size) {
@@ -36,7 +37,7 @@ static uint32_t pool_alloc(NcKernel *k, uint32_t size)
     }
     if (size + POOL_HDR > NC_PAGE) {
         const uint32_t len = nc_align_up(size + POOL_HDR, NC_PAGE);
-        const uint32_t pa = nc_vm_alloc_phys_high(k->vm, len);
+        const uint32_t pa = nc_vm_alloc_phys_block(k->vm, len);
         if (pa != UINT32_MAX) {
             const uint32_t p = NC_CONTIG_WINDOW | pa;
             memset(nc_vm_host(k->vm, p), 0, len);

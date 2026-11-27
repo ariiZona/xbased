@@ -3256,8 +3256,16 @@ static uint32_t target_part(uint32_t pa, uint32_t code, const HleFmtInfo *fi, ui
     }
     const uint32_t bytes = fi->bpp / 8, rel = src ? pa - src->d.pa : 0;
     const uint32_t x = bytes ? rel % pitch / bytes : 0, y = src ? rel / pitch : 0;
+    /* The CPU wrote the target's memory since its image was taken in (its
+     * memory the newer, or the old paths' dirty rows): the part is copied
+     * again, the image getting the memory first (coh_first_write below),
+     * whatever the texture's image's age. Alter Echo's intro movie, Bink
+     * frames the CPU writes into a 640 x 480 texture inside the memory of a
+     * 640 x 576 back buffer it drew before: the part was copied once, and
+     * the movie stayed on its first frame while it played (#197). */
+    const bool cpu = src && (coh_mem_newer(src) || obj_written(src));
     if (!src || !bytes || rel % pitch % bytes || x + w > src->d.w || y + h > src->d.h || !src->written ||
-        (dst && src->written <= dst->written)) {
+        (dst && src->written <= dst->written && !cpu)) {
         return dst ? dst->id : 0;           /* the image there is the newer */
     }
     /* The part goes into an image of its own size. Copied into a larger one
@@ -3273,7 +3281,7 @@ static uint32_t target_part(uint32_t pa, uint32_t code, const HleFmtInfo *fi, ui
     if (!dst || dst->d.w > w || dst->d.h > h) {
         PbObj *own = obj_of(object(pa, code, pitch, w, h));
         if (own && own != src && (!dst || (own->d.w == w && own->d.h == h))) {
-            if (own->written >= src->written) {
+            if (own->written >= src->written && !cpu) {
                 return own->id;             /* copied since the source's last draw */
             }
             dst = own;

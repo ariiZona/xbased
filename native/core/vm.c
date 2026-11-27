@@ -848,6 +848,26 @@ uint32_t nc_vm_alloc_phys_high(NcVm *vm, uint32_t len)
     return pa != UINT32_MAX ? pa : nc_vm_alloc_phys_top(vm, len, 0, vm->ram_size, NC_PAGE, &moved);
 }
 
+/* A pool block is reached through the contiguous window and never moves, so
+ * it takes a hole (the smallest free run, as page tables do) instead of the
+ * top of the highest free run, where the next contiguous block goes. Psi-Ops
+ * frees its 1.9 MiB text file as a new game starts, creates its
+ * cinematics' threads (their kernel blocks, 2-5 pages each) and reads the
+ * file into a block of the same size: on the console the block comes back
+ * where it was, and the title keeps using a pixel shader pointer into the
+ * old one. With the threads' blocks at the top of the hole the new block
+ * came 52 KiB lower, the pointer read the text, and the title faulted as the
+ * first level came up (#444). */
+uint32_t nc_vm_alloc_phys_block(NcVm *vm, uint32_t len)
+{
+    const uint32_t below = vm->ram_size > NC_TOP_RESERVE ? vm->ram_size - NC_TOP_RESERVE : vm->ram_size;
+    uint32_t pa = nc_vm_alloc_phys(vm, len, 0, below);
+    if (pa == UINT32_MAX) {
+        pa = nc_vm_alloc_phys(vm, len, 0, vm->ram_size);
+    }
+    return pa != UINT32_MAX ? pa : nc_vm_alloc_phys_high(vm, len);
+}
+
 static uint32_t free_pages(const NcVm *vm)
 {
     uint32_t n = 0;

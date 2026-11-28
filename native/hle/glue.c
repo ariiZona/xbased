@@ -17,6 +17,7 @@
 #include "hw/xbox/hle/vk/drvcrash.h"
 #include "native/core/core.h"
 #include "hw/xbox/hle/mem/guestmem.h"
+#include "hw/xbox/hle/mem/barrier.h"
 #include "hw/xbox/hle/hitch.h"
 #include "native/core/irq.h"
 #include "hw/xbox/hle/pb/pbmode.h"
@@ -74,6 +75,14 @@ static bool keep_wait(uint64_t timeout_ns)
     return !hle_pb_active() || hle_pbd_keep_wait(timeout_ns);
 }
 
+/* The core's hidden memory opened (vm.c nc_vm_shadow_open): the GPU's and
+ * the tracking's reach past RAM */
+static void hle_grow(uint32_t phys_end)
+{
+    hle_guestmem_grow(phys_end);
+    hle_barrier_bound(phys_end);
+}
+
 void nc_hle_boot(NcKernel *k, NcVm *vm, NcCpu *cpu, const NcCpuContext *boot)
 {
     g_cpu = cpu;
@@ -83,6 +92,8 @@ void nc_hle_boot(NcKernel *k, NcVm *vm, NcCpu *cpu, const NcCpuContext *boot)
     nc_hle_dirty_init(vm);
 
     hle_guestmem_init(vm->phys, vm->ram_size, 0);
+    hle_guestmem_reserve(nc_vm_backing(vm));
+    nc_vm_grow_hooks[0] = hle_grow;
     hle_init();
     k->hle_keep = keep;
     k->hle_keep_wait = keep_wait;

@@ -132,7 +132,7 @@ int hle_va_rw(uint32_t va, void *buf, size_t len, bool write)
         if (pa == UINT32_MAX || va >= 0xFD000000u) {
             return -1; /* unmapped, or a device window */
         }
-        if (pa < g_vm->ram_size) {
+        if (pa < g_vm->phys_end) {
             /* The RAM view, never protected; a write is a guest write. */
             if (write) {
                 memcpy(g_vm->phys + pa, b, n);

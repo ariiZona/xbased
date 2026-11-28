@@ -8,7 +8,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-void hle_barrier_init(uint64_t ram_size);
+void hle_barrier_init(uint64_t ram_size, uint64_t reserve);
+void hle_barrier_bound(uint64_t ram_size);
 /* GPU work up to `value` depends on [pa, pa+len): the first CPU write waits. */
 void hle_barrier_arm(uint32_t pa, uint32_t len, uint64_t value);
 /* GPU work up to `value` (a landing, a copy that reads the range) has the

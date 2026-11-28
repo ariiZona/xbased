@@ -217,7 +217,7 @@ void hle_init(void)
 {
     memset(&g_hle, 0, sizeof(g_hle));
     hle_prof_init();
-    hle_barrier_init(hle_ram_size());
+    hle_barrier_init(hle_ram_size(), hle_ram_reserve());
     hle_log("xbased-hle", "init");
     /* the reports every second (the decoder's and the back end's counts, the
      * profile, the debug views): a build made to investigate only */

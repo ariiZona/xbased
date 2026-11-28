@@ -559,7 +559,8 @@ void nc_ps_schedule(NcKernel *k, NcFrame *f)
     if (cur && cur != next && cur->state == NC_T_TERMINATED) {
         /* Off its stack for good: the pages go back (titles start threads per
          * movie and load), the slot can hold a new thread. Its ETHREAD stays,
-         * signaled, for whoever still holds a handle. */
+         * signaled, for whoever still holds a handle, and goes with the last
+         * of them (now, if none is left: nc_ob_thread_gone). */
         const uint32_t end = cur->stack_base + STACK_OVER;  /* the pages over the top (thread_create, nc_ps_old_stacks) */
         for (uint32_t p = cur->stack_limit; p < end; p += NC_PAGE) {
             const uint32_t pa = nc_vm_phys(k->vm, p);
@@ -570,6 +571,7 @@ void nc_ps_schedule(NcKernel *k, NcFrame *f)
         }
         nc_ps_stack_free(k, cur->stack_limit, cur->stack_base - cur->stack_limit);
         cur->state = NC_T_FREE;
+        nc_ob_thread_gone(k, cur->ethread);
     }
     nc_frame_load(f, &next->ctx);
     next->fresh = false;

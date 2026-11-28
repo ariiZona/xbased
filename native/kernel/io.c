@@ -1059,6 +1059,8 @@ typedef struct DiscJob {
     uint32_t va, n;
     uint32_t dev_us;         /* the drive's time for it (console timing), 0: none */
     uint32_t iosb, event, apc, apc_ctx;
+    bool event_ref;          /* the event is a handle's object: referenced till it is set, as the
+                                console's I/O manager keeps it (a title may close it meanwhile) */
     uint32_t port, port_key; /* its completion port's packet (file_port), port 0: none */
     NcThread *thread;
     uint32_t thread_id;      /* its id then: the slot may hold another thread by the end */
@@ -1203,7 +1205,8 @@ static bool disc_read_later(NcKernel *k, const NcFile *nf, const uint32_t *a, co
         }
     }
     DiscJob j = {.disc = k->disc, .file = nf->disc, .fd = -1, .off = off, .va = run[0].va, .n = n,
-                 .dev_us = dev_us, .iosb = a[4], .event = event, .apc = a[2], .apc_ctx = a[3],
+                 .dev_us = dev_us, .iosb = a[4], .event = event, .event_ref = a[1] != 0, .apc = a[2],
+                 .apc_ctx = a[3],
                  .thread = k->current, .thread_id = k->current ? k->current->id : 0, .sync = sync,
                  .write = write, .slot = (unsigned)(nf - g_files)};
     snprintf(j.path, sizeof(j.path), "%s", nf->path);
@@ -1224,7 +1227,7 @@ static bool disc_read_later(NcKernel *k, const NcFile *nf, const uint32_t *a, co
         for (uint32_t va = run[r].va, left = run[r].len; left;) {
             const uint32_t room = NC_PAGE - (va & (NC_PAGE - 1)), chunk = left < room ? left : room;
             const uint32_t pa = nc_vm_phys(k->vm, va);
-            if (pa == UINT32_MAX || (uint64_t)pa + chunk > k->vm->ram_size) {
+            if (pa == UINT32_MAX || (uint64_t)pa + chunk > k->vm->phys_end) {
                 free(j.seg);
                 return false;               /* not all RAM: in place */
             }
@@ -1257,6 +1260,9 @@ static bool disc_read_later(NcKernel *k, const NcFile *nf, const uint32_t *a, co
     }
     const bool queued = r->started && r->busy < DISC_JOBS;
     if (queued) {
+        if (j.event_ref) {
+            nc_ob_reference(k, event);
+        }
         g_file_jobs[j.slot]++;
         pin_buffer(k, &j, 1);
         j.seq = sync ? 0 : ++g_async_seq;
@@ -1304,6 +1310,9 @@ static void disc_read_done(NcKernel *k, const DiscJob *j)
     io_status(k, j->iosb, st, n);
     if (j->event) {
         nc_ke_set_event(k, j->event);
+    }
+    if (j->event_ref) {
+        nc_ob_dereference(k, j->event);
     }
     if (j->sync && j->thread && j->thread->id == j->thread_id && j->thread->state == NC_T_WAITING) {
         nc_ke_wake(k, j->thread, st);   /* its NtReadFile returns now */
@@ -1993,7 +2002,7 @@ static bool read_run_again(NcKernel *k, const NcFile *nf, uint64_t o, uint32_t v
         const uint32_t a = va + done, room = NC_PAGE - (a & (NC_PAGE - 1));
         const uint32_t chunk = len - done < room ? len - done : room;
         const uint32_t pa = nc_vm_phys(k->vm, a);
-        if (pa != UINT32_MAX && (uint64_t)pa + chunk <= k->vm->ram_size) {
+        if (pa != UINT32_MAX && (uint64_t)pa + chunk <= k->vm->phys_end) {
             const uint64_t gpu = nc_vm_dma.fence ? nc_vm_dma.fence(pa, chunk) : 0;
             if (gpu && nc_vm_dma.wait) {
                 nc_vm_dma.wait(gpu);

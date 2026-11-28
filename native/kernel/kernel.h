@@ -359,6 +359,13 @@ void nc_kernel_frame_chain(NcKernel *k, NcFrame *f, char *buf, size_t len);
 /* Allocates an object (OBJECT_HEADER + zeroed body) and returns the body VA. */
 /* ObfDereferenceObject: an object no one holds any more is freed (ob.c). */
 void nc_ob_dereference(NcKernel *k, uint32_t object);
+void nc_ob_reference(NcKernel *k, uint32_t object);
+/* A thread's slot freed (ps.c): its object goes if nothing holds it. */
+void nc_ob_thread_gone(NcKernel *k, uint32_t ethread);
+/* A mutant got an owner (ke.c). */
+void nc_ob_mutant_owned(uint32_t mutant);
+/* A savestate loaded: the objects made before it aren't known. */
+void nc_ob_forget(void);
 uint32_t nc_ob_create(NcKernel *k, enum NcObType type, uint32_t body_size);
 uint32_t nc_ob_handle(NcKernel *k, uint32_t object, enum NcObType type);
 uint32_t nc_ob_lookup(NcKernel *k, uint32_t handle, enum NcObType *type);
@@ -542,6 +549,7 @@ void nc_ke_wake(NcKernel *k, NcThread *t, uint32_t status);
 /* Whether a waiting thread waits on object (an object freed meanwhile:
  * ob.c release). */
 bool nc_ke_object_waited(NcKernel *k, uint32_t object);
+uint32_t nc_ke_mutant_owner(NcKernel *k, uint32_t mutant);
 /* A timer object out of the timer queue before its memory goes (ob.c). */
 void nc_timer_forget(NcKernel *k, uint32_t timer);
 

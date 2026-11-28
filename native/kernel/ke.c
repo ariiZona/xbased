@@ -401,6 +401,7 @@ static void acquire(NcKernel *k, uint32_t obj, const NcThread *t)
     case OBJ_MUTANT:
         set_signal_state(k, obj, signal_state(k, obj) - 1);
         nc_vm_wr32(k->vm, obj + MUTANT_OWNER, t->ethread);
+        nc_ob_mutant_owned(obj);
         break;
     default:
         break; /* notification objects and threads stay signaled */
@@ -948,6 +949,14 @@ static void init_mutant(NcKernel *k, uint32_t m, bool owned)
 {
     init_header(k, m, OBJ_MUTANT, 8, owned ? 0 : 1);
     nc_vm_wr32(k->vm, m + MUTANT_OWNER, owned && k->current ? k->current->ethread : 0);
+    if (owned && k->current) {
+        nc_ob_mutant_owned(m);
+    }
+}
+
+uint32_t nc_ke_mutant_owner(NcKernel *k, uint32_t mutant)
+{
+    return nc_vm_rd32(k->vm, mutant + MUTANT_OWNER);
 }
 
 static uint32_t release_mutant(NcKernel *k, uint32_t m, int inc)

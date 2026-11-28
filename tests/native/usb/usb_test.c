@@ -282,6 +282,7 @@ int main(void)
     setvbuf(stdout, NULL, _IONBF, 0);
     g_ram = calloc(1, RAM_SIZE);
     g_vm.ram_size = RAM_SIZE;
+    g_vm.phys_end = RAM_SIZE;
     g_vm.phys = g_ram;
     o->vm = &g_vm;
     pthread_mutex_init(&o->lock, NULL);

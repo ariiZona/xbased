@@ -128,6 +128,8 @@ typedef struct PbObj {
     uint32_t id;
     HleSurfDesc d;
     uint64_t bound;                     /* when last bound as a target (g_pd.binds) */
+    uint64_t used;                      /* g_pd.swaps when last bound as a target, or sampled as an
+                                           owner (owners_release) */
     bool owner;                         /* a texture's image of its faces' or levels' targets: views
                                            into it (cube_of_targets) or copies (mips_of_targets) */
     uint32_t lvl_id[16];                /* mips_of_targets: each level's target as last copied, */
@@ -716,15 +718,16 @@ static void restored_pixels(PbObj *o)
 /* The slot a new object takes once all are used: the one bound longest ago
  * (never bound first), and never one still in use: the bound targets, the
  * one shown, a cube or its faces (views into it), a z-read's source, the
- * one just made (a bind makes its colour target, then its depth one).
+ * one just made (a bind makes its colour target, then its depth one), one
+ * over [keep_lo, keep_hi) (a cube's or mipmaps' targets, about to make one).
  * NULL if every one is. */
-static PbObj *evict_slot(void)
+static PbObj *evict_slot(uint32_t keep_lo, uint32_t keep_hi)
 {
     PbObj *best = NULL;
     for (unsigned i = 0; i < g_pd.nobjs; i++) {
         PbObj *o = &g_pd.objs[i];
         bool busy = o->id == g_pd.rt || o->id == g_pd.ds || o->id == g_pd.shown_id ||
-                    o->id == g_pd.made || o->owner || o->d.parent;
+                    o->id == g_pd.made || o->owner || o->d.parent || (o->d.pa >= keep_lo && o->d.pa < keep_hi);
         for (unsigned j = 0; j < g_pd.nzr && !busy; j++) {
             busy = g_pd.zr[j].src == o->id;
         }
@@ -790,7 +793,7 @@ static uint32_t object(uint32_t pa, uint32_t xfmt, uint32_t pitch, uint32_t w, u
     if (g_pd.nobjs < MAX_OBJS) {
         o = &g_pd.objs[g_pd.nobjs++];
     } else {
-        o = evict_slot();
+        o = evict_slot(0, 0);
         if (!o) {
             static unsigned s_full;
             if (s_full++ < 8) {
@@ -1464,6 +1467,7 @@ static void sync_rt(void)
     for (unsigned i = 0; i < g_pd.nobjs; i++) {
         if (g_pd.objs[i].id == rt || g_pd.objs[i].id == ds) {
             g_pd.objs[i].bound = g_pd.binds;
+            g_pd.objs[i].used = g_pd.swaps;
         }
     }
     if (ds && ds != g_pd.ds) {
@@ -1791,6 +1795,8 @@ static uint32_t scanout_object(uint32_t pa)
     return id;
 }
 
+static void owners_release(void);
+
 static void swap(void)
 {
     sync_rt();
@@ -1862,6 +1868,7 @@ static void swap(void)
     g_pd.swap_wseq = g_pd.wseq;
     __atomic_store_n(&g_pd.ahead_pa, 0, __ATOMIC_RELEASE);
     frame_behind(frame_value);
+    owners_release();
 }
 
 void hle_pbd_trap(void)
@@ -2609,10 +2616,30 @@ static bool face_target(const PbObj *o, uint32_t pa, uint32_t w, uint32_t bytes)
  * 2002's sun cube for its cars' highlights is cleared black each frame
  * through linear targets (five faces) and its sun drawn into the sixth
  * swizzled: with swizzled faces only, no cube, and the cars were white. */
+/* A slot for a cube's or mipmaps' own object: a free one, else the one
+ * evict_slot gives up (as a target's bind takes), never one of its own
+ * targets' (over [lo, hi)). NULL if none can go. */
+static PbObj *owner_slot(uint32_t lo, uint32_t hi)
+{
+    if (g_pd.nobjs < MAX_OBJS) {
+        return &g_pd.objs[g_pd.nobjs++];
+    }
+    PbObj *o = evict_slot(lo, hi);
+    if (o) {
+        coh_forget(o);
+        HleCmdObjDestroy *x = begin(HLE_OP_OBJ_DESTROY, sizeof(*x));
+        x->after = 0;
+        x->id = o->id;
+        hle_fe_commit();
+    }
+    return o;
+}
+
 static uint32_t cube_of_targets(uint32_t pa, uint32_t code, uint32_t w, uint32_t stride)
 {
     for (unsigned i = 0; i < g_pd.nobjs; i++) {
         if (g_pd.objs[i].owner && g_pd.objs[i].d.faces == 6 && g_pd.objs[i].d.pa == pa && g_pd.objs[i].d.w == w) {
+            g_pd.objs[i].used = g_pd.swaps;
             return g_pd.objs[i].id;
         }
     }
@@ -2627,32 +2654,43 @@ static uint32_t cube_of_targets(uint32_t pa, uint32_t code, uint32_t w, uint32_t
                 xfmt = g_pd.objs[i].d.xfmt;
             }
         }
-        if (!found || g_pd.nobjs >= MAX_OBJS) {
+        if (!found) {
             return 0;
         }
     }
-    PbObj *c = &g_pd.objs[g_pd.nobjs++];
+    PbObj *c = owner_slot(pa, pa + 6 * stride);
+    if (!c) {
+        return 0;
+    }
     memset(c, 0, sizeof(*c));
     c->id = g_pd.next_id++;
     c->owner = true;
+    c->used = g_pd.swaps;
     c->d = (HleSurfDesc){ .id = c->id, .xfmt = xfmt, .w = w, .h = w, .pa = pa, .levels = 1, .faces = 6 };
     HleCmdObj *oc = begin(HLE_OP_OBJ_CREATE, sizeof(*oc));
     oc->s = c->d;
     hle_fe_commit();
     for (unsigned f = 0; f < 6; f++) {
+        /* the face's targets become views; what the one drawn last holds goes
+         * into the face first (the cube is made at its first sampling, and a
+         * title may draw its faces once before it: Voodoo Vince renders its
+         * crystal ball's and its windows' reflection cubes as a scene starts,
+         * and with the faces' own images dropped the glass sampled a face
+         * never drawn and came out white, #408), then their own images go */
+        uint32_t old[8], nold = 0, newest_old = 0, newest_view = 0;
+        uint64_t newest = 0;
         for (unsigned i = 0; i < g_pd.nobjs; i++) {
             PbObj *o = &g_pd.objs[i];
             if (!face_target(o, pa + f * stride, w, bytes)) {
                 continue;
             }
-            /* the face's own image goes; the target is a view from now on */
-            HleCmdObjDestroy *x = begin(HLE_OP_OBJ_DESTROY, sizeof(*x));
-            x->after = 0;
-            x->id = o->id;
-            hle_fe_commit();
             if (g_pd.rt == o->id) {
                 g_pd.rt = 0;                /* bound again at the next draw */
                 g_pd.rt_dirty = true;
+            }
+            const uint32_t was = o->id;
+            if (nold < ARRAY_SIZE(old)) {
+                old[nold++] = was;
             }
             o->id = g_pd.next_id++;
             o->d.id = o->id;
@@ -2662,6 +2700,26 @@ static uint32_t cube_of_targets(uint32_t pa, uint32_t code, uint32_t w, uint32_t
             o->d.faces = 1;
             HleCmdObj *v = begin(HLE_OP_OBJ_CREATE, sizeof(*v));
             v->s = o->d;
+            hle_fe_commit();
+            if (o->written > newest) {
+                newest = o->written;
+                newest_old = was;
+                newest_view = o->id;
+            }
+        }
+        if (newest_old) {
+            HleCmdCopy *cp = begin(HLE_OP_COPY, sizeof(*cp));
+            memset(cp, 0, sizeof(*cp));
+            cp->src = newest_old;
+            cp->dst = newest_view;
+            cp->nrects = 1;
+            cp->rect[0] = (HleRect){ 0, 0, (int32_t)w, (int32_t)w };
+            hle_fe_commit();
+        }
+        for (uint32_t k = 0; k < nold; k++) {
+            HleCmdObjDestroy *x = begin(HLE_OP_OBJ_DESTROY, sizeof(*x));
+            x->after = 0;
+            x->id = old[k];
             hle_fe_commit();
         }
     }
@@ -2739,10 +2797,9 @@ static uint32_t mips_of_targets(uint32_t pa, uint32_t code, uint32_t w, uint32_t
             xfmt = n ? xfmt : t->d.xfmt;
             off += lw * lh * bytes;
         }
-        if (n < 2 || g_pd.nobjs >= MAX_OBJS) {
+        if (n < 2 || !(c = owner_slot(pa, pa + off))) {
             return 0;
         }
-        c = &g_pd.objs[g_pd.nobjs++];
         memset(c, 0, sizeof(*c));
         c->id = g_pd.next_id++;
         c->owner = true;
@@ -2773,7 +2830,94 @@ static uint32_t mips_of_targets(uint32_t pa, uint32_t code, uint32_t w, uint32_t
         cp->rect[0] = (HleRect){ 0, 0, (int32_t)lw, (int32_t)lh };
         hle_fe_commit();
     }
+    c->used = g_pd.swaps;
     return c->id;
+}
+
+/* A cube's or mipmaps' own object stays until it goes here, and a cube's
+ * faces' targets, its views, never go (evict_slot): Sega GT 2002 makes two
+ * cubes for the cars of each race and of its menus, at memory of their own
+ * every time, and after a few races its cubes and their faces held almost
+ * every slot; the next race's had none, their sampler got face 0's 2D
+ * image and the cars came out white (#91). So with few slots left, one
+ * neither sampled nor drawn into for a second (OWNER_IDLE swaps) goes, its
+ * faces' targets images of their own again, what they hold copied out of
+ * it: sampled again later, it is made again as it was, from them. At a
+ * swap, the objects moved for its slot not held elsewhere but as the bound
+ * targets' (rt_obj, ds_obj). */
+#define OWNER_IDLE 60
+#define OWNER_ROOM 16
+static void owners_release(void)
+{
+    for (unsigned n = 0; n < 2 && g_pd.nobjs + OWNER_ROOM > MAX_OBJS; n++) {
+        PbObj *c = NULL;
+        uint64_t c_used = 0;
+        for (unsigned i = 0; i < g_pd.nobjs; i++) {
+            PbObj *o = &g_pd.objs[i];
+            if (!o->owner || o->id == g_pd.shown_id) {
+                continue;
+            }
+            uint64_t used = o->used;
+            bool busy = false;
+            for (unsigned j = 0; j < g_pd.nobjs && !busy; j++) {
+                const PbObj *v = &g_pd.objs[j];
+                if (v->d.parent == o->id) {
+                    used = MAX(used, v->used);
+                    busy = v->id == g_pd.rt || v->id == g_pd.ds || v->id == g_pd.shown_id;
+                    for (unsigned k = 0; k < g_pd.nzr && !busy; k++) {
+                        busy = g_pd.zr[k].src == v->id;
+                    }
+                }
+            }
+            if (!busy && g_pd.swaps - used >= OWNER_IDLE && (!c || used < c_used)) {
+                c = o;
+                c_used = used;
+            }
+        }
+        if (!c) {
+            return;
+        }
+        unsigned faces = 0;
+        for (unsigned j = 0; j < g_pd.nobjs; j++) {
+            PbObj *v = &g_pd.objs[j];
+            if (v->d.parent != c->id) {
+                continue;
+            }
+            const uint32_t was = v->id;
+            v->id = g_pd.next_id++;
+            v->d.id = v->id;
+            v->d.parent = 0;
+            v->d.face = 0;
+            HleCmdObj *oc = begin(HLE_OP_OBJ_CREATE, sizeof(*oc));
+            oc->s = v->d;
+            hle_fe_commit();
+            HleCmdCopy *cp = begin(HLE_OP_COPY, sizeof(*cp));
+            memset(cp, 0, sizeof(*cp));
+            cp->src = was;
+            cp->dst = v->id;
+            cp->nrects = 1;
+            cp->rect[0] = (HleRect){ 0, 0, (int32_t)v->d.w, (int32_t)v->d.h };
+            hle_fe_commit();
+            HleCmdObjDestroy *x = begin(HLE_OP_OBJ_DESTROY, sizeof(*x));
+            x->after = 0;
+            x->id = was;
+            hle_fe_commit();
+            faces++;
+        }
+        HleCmdObjDestroy *x = begin(HLE_OP_OBJ_DESTROY, sizeof(*x));
+        x->after = 0;
+        x->id = c->id;
+        hle_fe_commit();
+        hle_log("xbased-hle-pb", "%s %u at %08x: unused %llu swaps, %u targets its own again (%u objects)",
+                c->d.faces == 6 ? "cube" : "mipmaps", c->id, c->d.pa, (unsigned long long)(g_pd.swaps - c_used),
+                faces, g_pd.nobjs - 1);
+        PbObj *last = &g_pd.objs[--g_pd.nobjs];
+        if (c != last) {
+            *c = *last;
+            g_pd.rt_obj = g_pd.rt_obj == last ? c : g_pd.rt_obj;
+            g_pd.ds_obj = g_pd.ds_obj == last ? c : g_pd.ds_obj;
+        }
+    }
 }
 
 static const HleSurfDesc *object_desc(uint32_t id)

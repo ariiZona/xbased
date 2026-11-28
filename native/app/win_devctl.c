@@ -144,7 +144,7 @@ static bool mem_get(uint32_t va, uint8_t *b, unsigned n, bool phys)
     const NcVm *vm = &g_dc.core->vm;
     for (unsigned i = 0; i < n; i++) {
         const uint32_t pa = phys ? va + i : nc_vm_phys(vm, va + i);
-        if (pa == UINT32_MAX || pa >= vm->ram_size) {
+        if (pa == UINT32_MAX || pa >= vm->phys_end) {
             return false;
         }
         b[i] = vm->phys[pa];

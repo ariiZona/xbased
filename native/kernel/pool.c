@@ -21,6 +21,7 @@ void nc_pool_init(NcKernel *k, uint32_t va, uint32_t len)
     k->pool_free[0] = (NcRange){va, len};
     k->pool_nfree = 1;
     memset(nc_vm_host(k->vm, va), 0, len);
+    nc_vm_kpool(k->vm, va - NC_CONTIG_WINDOW, len);
 }
 
 /* More pool: a chunk of free physical RAM joins the free list. */
@@ -32,6 +33,7 @@ static bool pool_grow(NcKernel *k, uint32_t size)
         return false;
     }
     memset(nc_vm_host(k->vm, NC_CONTIG_WINDOW | pa), 0, chunk);
+    nc_vm_kpool(k->vm, pa, chunk);
     k->pool_len += chunk;
     nc_pool_free(k, NC_CONTIG_WINDOW | pa, chunk);
     return true;

@@ -100,6 +100,14 @@ static HWND top_child(void)
     return GetWindow(g_fw, GW_CHILD);
 }
 
+/* A run's window kept out of sight (the frame presents its pictures): the
+ * run marks it and makes it 1x1 before it joins the frame (nc_frame_adopt).
+ * Joined first and made small after, a resize of the frame between the two
+ * (going fullscreen as it starts) stretched it over the frame, and the
+ * window, drawing nothing, hid the pictures: an empty window with the game
+ * running, about one start in five on some machines (#234). */
+#define FRAME_HIDDEN_PROP L"xbased_frame_hidden"
+
 static void fit_children(void)
 {
     RECT rc;
@@ -107,7 +115,7 @@ static void fit_children(void)
     for (HWND c = top_child(); c; c = GetWindow(c, GW_HWNDNEXT)) {
         RECT cr;
         GetWindowRect(c, &cr);
-        if (cr.right - cr.left <= 1) {
+        if (GetPropW(c, FRAME_HIDDEN_PROP) || cr.right - cr.left <= 1) {
             continue;   /* a run's window kept out of sight (the frame presents its pictures) */
         }
         SetWindowPos(c, NULL, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1525,6 +1533,7 @@ void nc_frame_fill(void *frame, SDL_Window *child)
 {
     RECT rc;
     GetClientRect((HWND)frame, &rc);
+    RemovePropW(hwnd_of(child), FRAME_HIDDEN_PROP);     /* drawn in the window now: the frame fills it */
     SetWindowPos(hwnd_of(child), NULL, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -1539,6 +1548,13 @@ void nc_frame_adopt(void *frame, SDL_Window *child, const char *title, bool hidd
     wchar_t wt[512];
     if (title && MultiByteToWideChar(CP_UTF8, 0, title, -1, wt, 512)) {
         SendMessageW(f, WM_SETTEXT, 0, (LPARAM)wt);  /* this run's title (another executable's) */
+    }
+    if (hidden) {
+        /* marked and 1x1 before it is the frame's: fit_children never stretches it */
+        SetPropW(c, FRAME_HIDDEN_PROP, (HANDLE)1);
+        SetWindowPos(c, NULL, 0, 0, 1, 1, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    } else {
+        RemovePropW(c, FRAME_HIDDEN_PROP);
     }
     SetWindowLongPtrA(c, GWL_STYLE, WS_CHILD | WS_CLIPSIBLINGS);
     SetWindowLongPtrA(c, GWL_EXSTYLE, 0);

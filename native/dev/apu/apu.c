@@ -784,8 +784,18 @@ static void *apu_trace_thread(void *arg)
     return NULL;
 }
 
+/* the core's hidden memory opened: the APU's DMA reaches past RAM */
+static void apu_grow(uint32_t phys_end)
+{
+    g_apu_ram_size = phys_end;
+    if (g_state) {
+        g_state->ram_size = phys_end;
+    }
+}
+
 void nc_dev_apu_init(NcVm *vm)
 {
+    nc_vm_grow_hooks[1] = apu_grow;
     MCPXAPUState *d = calloc(1, sizeof(*d));
     g_state = d;
     g_apu_ram = vm->phys;

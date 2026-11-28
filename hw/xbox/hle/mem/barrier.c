@@ -12,7 +12,7 @@
 
 static HlePageUse g_pu;
 static HlePageFree g_pf;
-static uint64_t g_ram;
+static uint64_t g_ram, g_ram_cap;   /* reachable, backed (hle_barrier_bound) */
 static uint64_t (*g_completed)(void);
 static void (*g_wait)(uint64_t);
 static void (*g_flush)(uint64_t);
@@ -69,9 +69,11 @@ uint64_t hle_mem_wseq_blocks(uint32_t pa, uint32_t len)
     return s;
 }
 
-void hle_barrier_init(uint64_t ram_size)
+void hle_barrier_init(uint64_t ram_size, uint64_t reserve)
 {
     g_ram = ram_size;
+    g_ram_cap = reserve > ram_size ? reserve : ram_size;
+    ram_size = g_ram_cap;               /* (the tables for all of it) */
     hle_pageuse_init(&g_pu, ram_size);
     hle_pagefree_init(&g_pf, ram_size);
     g_contended = g_new0(uint32_t, (ram_size >> 12) / 32 + 1);
@@ -81,6 +83,13 @@ void hle_barrier_init(uint64_t ram_size)
     g_bseq = g_new0(uint32_t, (ram_size >> (12 + WBLOCK_SHIFT)) + 1);
     g_nbr_n = g_new0(uint16_t, ram_size >> 12);
     g_nbr_t = g_new0(uint32_t, ram_size >> 12);
+}
+
+void hle_barrier_bound(uint64_t ram_size)
+{
+    if (ram_size > g_ram && ram_size <= g_ram_cap) {
+        g_ram = ram_size;
+    }
 }
 
 void hle_barrier_set_waiter(uint64_t (*completed)(void), void (*wait)(uint64_t))

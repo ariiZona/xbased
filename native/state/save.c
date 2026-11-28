@@ -390,7 +390,8 @@ const char *nc_state_load(const char *path)
     }
     const char *err = nc_state_read(path, &info, k_sections, NSECTIONS);
     if (!err) {
-        hle_host_mem_set_dirty(0, k->vm->ram_size);     /* every page new to the GPU */
+        hle_host_mem_set_dirty(0, k->vm->phys_end);     /* every page new to the GPU */
+        nc_ob_forget();                                 /* the state's objects: none this run made */
         nc_kernel_clock_arm(k);
         nc_kernel_set_hd_key(k);                        /* a state from before it was set */
         /* The decoder looks at its registers again: what woke it in the run

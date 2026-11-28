@@ -211,7 +211,7 @@ bool nc_ram_access_span(const NcVm *vm, const siginfo_t *info, void *ucontext, u
     }
     const uint64_t g = nc_vm_guest_of(vm, (void *)(uintptr_t)a.ea);
     const uint32_t p0 = g == UINT64_MAX ? UINT32_MAX : nc_vm_phys(vm, (uint32_t)g);
-    if (p0 == UINT32_MAX || (p0 & (NC_PAGE - 1)) + a.bytes > NC_PAGE || (uint64_t)p0 + a.bytes > vm->ram_size) {
+    if (p0 == UINT32_MAX || (p0 & (NC_PAGE - 1)) + a.bytes > NC_PAGE || (uint64_t)p0 + a.bytes > vm->phys_end) {
         return false;
     }
     *lo = p0;
@@ -229,7 +229,7 @@ bool nc_ram_emulate(NcVm *vm, const siginfo_t *info, void *ucontext,
     }
     const uint64_t g = nc_vm_guest_of(vm, (void *)(uintptr_t)a.ea);
     const uint32_t pa = g == UINT64_MAX ? UINT32_MAX : nc_vm_phys(vm, (uint32_t)g);
-    if (pa == UINT32_MAX || (pa & (NC_PAGE - 1)) + a.bytes > NC_PAGE || (uint64_t)pa + a.bytes > vm->ram_size) {
+    if (pa == UINT32_MAX || (pa & (NC_PAGE - 1)) + a.bytes > NC_PAGE || (uint64_t)pa + a.bytes > vm->phys_end) {
         return false;
     }
     uint8_t data[16];

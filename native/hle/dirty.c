@@ -53,7 +53,7 @@ static void va_load(uint32_t va, uint32_t len)
     }
     for (uint32_t a = va & ~(NC_PAGE - 1); a < va + len; a += NC_PAGE) {
         const uint32_t pa = nc_vm_phys(g_vm, a);
-        if (pa < g_vm->ram_size) {
+        if (pa < g_vm->phys_end) {
             stale_open(pa, false);
         }
     }
@@ -65,7 +65,7 @@ static void va_load(uint32_t va, uint32_t len)
  * and drops its guard. */
 static void unguard_written(uint32_t pa, uint32_t len)
 {
-    for (uint32_t p = pa & ~(NC_PAGE - 1); p < pa + len && p < g_vm->ram_size; p += NC_PAGE) {
+    for (uint32_t p = pa & ~(NC_PAGE - 1); p < pa + len && p < g_vm->phys_end; p += NC_PAGE) {
         if (nc_vm_noaccess_has(g_vm, p)) {
             hle_barrier_unguard_range(pa, len);
             return;
@@ -84,7 +84,7 @@ static void freed(uint32_t pa, uint32_t len)
 void nc_hle_dirty_init(NcVm *vm)
 {
     g_vm = vm; /* every page starts dirty (unprotected) */
-    g_hdirty = calloc(vm->ram_size / NC_PAGE, 1);
+    g_hdirty = calloc(nc_vm_backing(vm) / NC_PAGE, 1);
     nc_vm_write_hook = hle_va_store;
     nc_vm_read_hook = va_load;
     nc_vm_free_hook = freed;
@@ -94,7 +94,7 @@ void nc_hle_dirty_init(NcVm *vm)
 
 bool hle_host_mem_dirty(uint32_t pa)
 {
-    if (!g_vm || pa >= g_vm->ram_size) {
+    if (!g_vm || pa >= g_vm->phys_end) {
         return true;
     }
     return __atomic_load_n(&g_vm->wp[pa / NC_PAGE], __ATOMIC_ACQUIRE) != NC_WP_CLEAN ||
@@ -103,7 +103,7 @@ bool hle_host_mem_dirty(uint32_t pa)
 
 bool hle_host_mem_open(uint32_t pa)
 {
-    if (!g_vm || pa >= g_vm->ram_size) {
+    if (!g_vm || pa >= g_vm->phys_end) {
         return true;
     }
     return __atomic_load_n(&g_vm->wp[pa / NC_PAGE], __ATOMIC_ACQUIRE) != NC_WP_CLEAN &&
@@ -113,7 +113,7 @@ bool hle_host_mem_open(uint32_t pa)
 static uint64_t ram_end(uint32_t pa, uint32_t len)
 {
     const uint64_t end = (uint64_t)pa + len;
-    return end < g_vm->ram_size ? end : g_vm->ram_size;
+    return end < g_vm->phys_end ? end : g_vm->phys_end;
 }
 
 /* Pages of [pa, pa + len) whose protection is not `ro` get it, a run of
@@ -362,7 +362,7 @@ void nc_hle_watch_rearm(void)
      * up writable (a page protected before it was mapped). */
     static uint32_t armed[16];
     unsigned i = 0;
-    for (uint32_t a = g_wlo & ~(NC_PAGE - 1); a < g_whi && a < g_vm->ram_size && i < 16; a += NC_PAGE, i++) {
+    for (uint32_t a = g_wlo & ~(NC_PAGE - 1); a < g_whi && a < g_vm->phys_end && i < 16; a += NC_PAGE, i++) {
         const uint32_t va = g_vm->rmap[a / NC_PAGE];
         if (g_vm->wp[a / NC_PAGE] != NC_WP_CLEAN || armed[i] != va) {
             nc_vm_protect_page(g_vm, a, true);
@@ -384,7 +384,7 @@ void hle_va_store(uint32_t va, uint32_t len)
     }
     for (uint32_t a = va & ~(NC_PAGE - 1); a < va + len; a += NC_PAGE) {
         const uint32_t pa = nc_vm_phys(g_vm, a);
-        if (pa == UINT32_MAX || pa >= g_vm->ram_size) {
+        if (pa == UINT32_MAX || pa >= g_vm->phys_end) {
             continue;
         }
         /* a page without access (barrier.c: a frame buffer or target whose
@@ -458,7 +458,7 @@ bool nc_hle_dirty_fault(const siginfo_t *info, void *ucontext)
         return false;
     }
     const uint32_t pa = nc_vm_phys(g_vm, (uint32_t)guest);
-    if (pa == UINT32_MAX || pa >= g_vm->ram_size) {
+    if (pa == UINT32_MAX || pa >= g_vm->phys_end) {
         return false;
     }
     if (nc_vm_noaccess_has(g_vm, pa)) {

@@ -809,8 +809,36 @@ static uint32_t contig_place(NcKernel *k, uint32_t size, uint32_t lo, uint32_t h
     return pa;
 }
 
+/* No window of RAM for the block, but one where only the kernel pool's
+ * pages stand: the block in the hidden memory (vm.c nc_vm_shadow_open), as
+ * much RAM held for it (its pages marked, as the block's own are), so that
+ * what the title sees free is what the console's block would leave. The
+ * console's pool is never there (its pages come from the bottom of RAM);
+ * a block that fails for any other reason fails as before. */
+static uint32_t hidden_place(NcKernel *k, uint32_t size, uint32_t lo, uint32_t hi, uint32_t align)
+{
+    NcVm *vm = k->vm;
+    if (!vm->shadow_size || nc_vm_free_bytes(vm) < size) {
+        return UINT32_MAX;              /* (a title sizing its heap by failures fails here, quickly) */
+    }
+    const uint8_t mark = nc_vm_free_mark(vm);
+    uint32_t pool = 0;
+    const uint32_t win = mark ? nc_vm_hold_for_pool(vm, size, lo, hi, align, mark, &pool) : UINT32_MAX;
+    if (win == UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    const uint32_t pa = nc_vm_shadow_open(vm) ? nc_vm_shadow_alloc(vm, size, align, mark) : UINT32_MAX;
+    if (pa == UINT32_MAX) {
+        nc_vm_release_mark(vm, mark);
+        return UINT32_MAX;
+    }
+    nc_log("xbased-native", "mm: contiguous allocation of %u KiB: no window but for %u kernel pool pages in the "
+           "one at %08x; the block in the hidden memory at %08x, as much RAM held for it", size >> 10, pool, win, pa);
+    return pa;
+}
+
 static uint32_t contig_alloc(NcKernel *k, uint32_t size, uint32_t lo, uint32_t hi, uint32_t align,
-                             uint32_t protect, uint32_t ra)
+                             uint32_t protect, uint32_t ra, bool high_ok)
 {
     /* more than the console has: the failure the sizes below end in (and
      * past 0xFFFFF000 the rounding wrapped to nothing, which "succeeded") */
@@ -834,6 +862,8 @@ static uint32_t contig_alloc(NcKernel *k, uint32_t size, uint32_t lo, uint32_t h
     if (pa == UINT32_MAX && g_ncontig < MAX_CONTIG && size <= k->vm->ram_size && nc_pool_give_back(k)) {
         pa = contig_place(k, size, lo, hi, align, &moved);
     }
+    const bool hidden = pa == UINT32_MAX && high_ok && g_ncontig < MAX_CONTIG && size <= k->vm->ram_size &&
+                        (pa = hidden_place(k, size, lo, hi, align)) != UINT32_MAX;
     if (pa != UINT32_MAX && moved) {
         static unsigned s_moves;
         const unsigned n = ++s_moves;
@@ -863,7 +893,11 @@ static uint32_t contig_alloc(NcKernel *k, uint32_t size, uint32_t lo, uint32_t h
         return 0;
     }
     s_failed = 0;
-    stale_fill(k, pa, size);
+    if (hidden) {
+        memset(k->vm->phys + pa, 0, size);      /* (no stale bytes past RAM) */
+    } else {
+        stale_fill(k, pa, size);
+    }
     /* An aligned block below another leaves the pages its alignment skipped
      * free between them, and virtual memory takes the highest free pages:
      * the block takes them too. On the console the blocks pack: what runs
@@ -917,10 +951,13 @@ static void contig_free(NcKernel *k, uint32_t va, uint32_t ra)
                 below = &g_contig[i];
             }
         }
-        if (below) {
+        const uint32_t pa = va & ~NC_CONTIG_WINDOW;
+        if (k->vm->shadow_size && pa >= k->vm->shadow_base && pa < k->vm->phys_end) {
+            nc_vm_release_mark(k->vm, k->vm->page_used[pa / NC_PAGE]);     /* hidden_place's: it and its RAM */
+        } else if (below) {
             below->slack += c->size + c->slack;
         } else {
-            nc_vm_free_phys(k->vm, va & ~NC_CONTIG_WINDOW, c->size + c->slack);
+            nc_vm_free_phys(k->vm, pa, c->size + c->slack);
         }
         *c = g_contig[--g_ncontig];
     } else if (va) {
@@ -947,14 +984,14 @@ uint32_t nc_mm_contig_free_callers(NcKernel *k, uint32_t lo, uint32_t hi)
 
 uint32_t nc_mm_contig_alloc(NcKernel *k, uint32_t size)
 {
-    return contig_alloc(k, size, 0, 0, NC_PAGE, PAGE_READWRITE, 0);
+    return contig_alloc(k, size, 0, 0, NC_PAGE, PAGE_READWRITE, 0, false);
 }
 
 /* MmAllocateContiguousMemory(NumberOfBytes): read-write (the kernel's Ex
  * with PAGE_READWRITE) */
 static uint64_t MmAllocateContiguousMemory(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
-    return contig_alloc(k, a[0], 0, 0, NC_PAGE, PAGE_READWRITE, caller_of(k, f));
+    return contig_alloc(k, a[0], 0, 0, NC_PAGE, PAGE_READWRITE, caller_of(k, f), true);
 }
 
 /* MmAllocateContiguousMemoryEx(NumberOfBytes, LowestAcceptableAddress,
@@ -970,7 +1007,10 @@ static uint64_t MmAllocateContiguousMemory(NcKernel *k, NcFrame *f, const uint32
 static uint64_t MmAllocateContiguousMemoryEx(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
     uint32_t hi = a[2] >= k->vm->ram_size - 1 ? 0 : (a[2] | (NC_PAGE - 1)) + 1;
-    return contig_alloc(k, a[0], a[1], hi, a[3] ? a[3] : NC_PAGE, a[4], caller_of(k, f));
+    /* (the hidden memory only for a block the title takes anywhere: past
+     * RAM's end and the hidden memory's too) */
+    const bool high_ok = (uint64_t)a[2] + 1 >= nc_vm_backing(k->vm);
+    return contig_alloc(k, a[0], a[1], hi, a[3] ? a[3] : NC_PAGE, a[4], caller_of(k, f), high_ok);
 }
 
 /* MmFreeContiguousMemory(BaseAddress) */
@@ -983,7 +1023,7 @@ static uint64_t MmFreeContiguousMemory(NcKernel *k, NcFrame *f, const uint32_t *
 /* MmAllocateSystemMemory(NumberOfBytes, Protect) */
 static uint64_t MmAllocateSystemMemory(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
-    return contig_alloc(k, a[0], 0, 0, NC_PAGE, a[1], caller_of(k, f));
+    return contig_alloc(k, a[0], 0, 0, NC_PAGE, a[1], caller_of(k, f), false);
 }
 
 /* MmFreeSystemMemory(BaseAddress, NumberOfBytes) -> pages freed */
@@ -1256,7 +1296,7 @@ static uint64_t MmClaimGpuInstanceMemory(NcKernel *k, NcFrame *f, const uint32_t
  * keep their addresses; RAM is reached through the contiguous window. */
 static uint64_t MmMapIoSpace(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
-    return a[0] < k->vm->ram_size ? (NC_CONTIG_WINDOW | a[0]) : a[0];
+    return a[0] < k->vm->phys_end ? (NC_CONTIG_WINDOW | a[0]) : a[0];
 }
 
 /* MmCreateKernelStack(NumberOfBytes, DebuggerThread) -> top of the new stack */

@@ -33,7 +33,37 @@ typedef struct NcVm {
     uint32_t *rmap;        /* per physical page: the user VA mapping it (besides the window), or 0 */
     uint8_t *wp;           /* per physical page: dirty tracking's (NC_WP_*); 0 not tracked */
     uint8_t *pin;          /* per physical page: NC_PIN_KNOWN | lock count (nc_vm_pin) */
+    /* The hidden memory past RAM (nc_vm_shadow_open): its size, and the end
+     * of the physical addresses devices and the HLE take (ram_size until it
+     * is opened) */
+    uint32_t shadow_base, shadow_size;
+    uint32_t phys_end;
 } NcVm;
+
+/* The hidden memory's size past retail RAM: a contiguous block the console
+ * would have found room for goes there when only the kernel pool's pages
+ * stand in the way (mm.c contig_alloc); never seen otherwise. */
+#define NC_SHADOW_SIZE (64u << 20)
+/* ... at 192 MiB, its window at 0x8C000000: past what titles take for theirs.
+ * RalliSport Challenge 2 frees a block inside [its small-block heap's base,
+ * the base + its size in KiB shifted as bytes) as a heap block: 0x83FCB000 to
+ * 0x8BFCB000, harmless on the console where nothing is past 0x84000000; at
+ * 64 MiB its menu's hidden block was never freed and the next race ran out
+ * of memory. */
+#define NC_SHADOW_BASE (192u << 20)
+
+/* All the physical memory backed: RAM, the hidden memory past it. */
+static inline uint32_t nc_vm_backing(const NcVm *vm)
+{
+    return vm->shadow_size ? vm->shadow_base + vm->shadow_size : vm->ram_size;
+}
+
+/* page_used values: 1 used, NC_PAGE_POOL the kernel pool's (nc_vm_kpool),
+ * NC_MARK_FIRST.. the pages a hidden block holds (its own and the RAM it
+ * stands for), one value per block. A savestate keeps them (VM section). */
+#define NC_PAGE_POOL  2u
+#define NC_MARK_FIRST 0x10u
+#define NC_MARK_LAST  0x2Fu
 
 /* NcVm.wp: protected in every view, unwritten since; written since (a guest
  * store's fault opened only the view it came through: the others may still
@@ -146,6 +176,28 @@ uint32_t nc_vm_alloc_phys_high(NcVm *vm, uint32_t len);
  * run that holds it, below the top reserve if it can, else as
  * nc_vm_alloc_phys_high (virtual pages moved). UINT32_MAX: no room. */
 uint32_t nc_vm_alloc_phys_block(NcVm *vm, uint32_t len);
+
+/* The used pages of [pa, pa + len) are the kernel pool's (freed, they are no one's). */
+void nc_vm_kpool(NcVm *vm, uint32_t pa, uint32_t len);
+
+/* The hidden memory reachable (its views mapped, phys_end past it, the
+ * grow hooks told): once, at its first block or a state that has it. */
+bool nc_vm_shadow_open(NcVm *vm);
+extern void (*nc_vm_grow_hooks[4])(uint32_t phys_end);
+
+/* For a block no window of RAM holds: the window in [lo, hi) (hi 0: all of
+ * RAM) whose used pages can all move or are the kernel pool's, with free
+ * pages enough to stand for the block; its free pages, then the lowest
+ * others, marked `mark` for the block's size less the pool's pages in it.
+ * The window's start, or UINT32_MAX (nothing marked). */
+uint32_t nc_vm_hold_for_pool(NcVm *vm, uint32_t len, uint32_t lo, uint32_t hi, uint32_t align, uint8_t mark,
+                             uint32_t *pool_pages);
+/* A block of the hidden memory, its pages marked `mark`; UINT32_MAX if none fits. */
+uint32_t nc_vm_shadow_alloc(NcVm *vm, uint32_t len, uint32_t align, uint8_t mark);
+/* Every page marked `mark` free again (a hidden block's and the RAM held for it). */
+void nc_vm_release_mark(NcVm *vm, uint8_t mark);
+/* A mark no page has (0: all taken). */
+uint8_t nc_vm_free_mark(const NcVm *vm);
 
 void nc_vm_free_phys(NcVm *vm, uint32_t pa, uint32_t len);
 

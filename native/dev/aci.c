@@ -133,7 +133,7 @@ static uint32_t channel_gs_bit(unsigned i)
 static void fetch_bd(Aci *a, Channel *c)
 {
     const uint32_t pa = c->bdbar + c->civ * 8u;
-    if ((uint64_t)pa + 8 <= a->vm->ram_size) {
+    if ((uint64_t)pa + 8 <= a->vm->phys_end) {
         const uint8_t *b = a->vm->phys + pa;
         c->bd_addr = nc_rd32(b) & ~3u;
         c->bd_ctl = nc_rd32(b + 4);

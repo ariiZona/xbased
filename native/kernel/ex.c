@@ -40,6 +40,7 @@ static uint32_t pool_alloc(NcKernel *k, uint32_t size)
         const uint32_t pa = nc_vm_alloc_phys_block(k->vm, len);
         if (pa != UINT32_MAX) {
             const uint32_t p = NC_CONTIG_WINDOW | pa;
+            nc_vm_kpool(k->vm, pa, len);
             memset(nc_vm_host(k->vm, p), 0, len);
             nc_vm_wr32(k->vm, p, size);
             nc_vm_wr32(k->vm, p + 4, POOL_PAGES);
@@ -719,6 +720,24 @@ static uint64_t ObfDereferenceObject(NcKernel *k, NcFrame *f, const uint32_t *a)
     return 0;
 }
 
+/* ObfReferenceObject(Object): a reference the title drops with
+ * ObfDereferenceObject (the object stays until then) */
+static uint64_t ObfReferenceObject(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    nc_ob_reference(k, a[0]);
+    return 0;
+}
+
+/* ObReferenceObjectByPointer(Object, ObjectType) */
+static uint64_t ObReferenceObjectByPointer(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    if (a[1] && nc_vm_rd32(k->vm, a[0] - 0x10 + 8) != a[1]) {
+        return NC_STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    nc_ob_reference(k, a[0]);
+    return NC_STATUS_SUCCESS;
+}
+
 /* ------------------------------------------------------------------- Dbg */
 
 /* The guest's string at va in buf (at most len - 1 bytes), as far as its
@@ -1369,6 +1388,8 @@ void nc_ex_register(NcKernel *k)
     nc_kernel_impl(k, "XeUnloadSection", XeUnloadSection);
     nc_kernel_impl(k, "ObReferenceObjectByHandle", ObReferenceObjectByHandle);
     nc_kernel_impl(k, "ObfDereferenceObject", ObfDereferenceObject);
+    nc_kernel_impl(k, "ObfReferenceObject", ObfReferenceObject);
+    nc_kernel_impl(k, "ObReferenceObjectByPointer", ObReferenceObjectByPointer);
     nc_kernel_impl(k, "DbgPrint", DbgPrint);
     nc_kernel_impl(k, "DbgBreakPoint", DbgBreakPoint);
     nc_kernel_impl(k, "AvGetSavedDataAddress", AvGetSavedDataAddress);

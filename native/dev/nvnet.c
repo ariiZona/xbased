@@ -266,7 +266,7 @@ typedef struct Desc {
 
 static bool desc_load(const Nvnet *s, uint32_t pa, Desc *d)
 {
-    if ((uint64_t)pa + 8 > s->vm->ram_size) {
+    if ((uint64_t)pa + 8 > s->vm->phys_end) {
         return false;
     }
     const uint8_t *p = s->vm->phys + pa;
@@ -278,7 +278,7 @@ static bool desc_load(const Nvnet *s, uint32_t pa, Desc *d)
 
 static void desc_store(Nvnet *s, uint32_t pa, const Desc *d)
 {
-    if ((uint64_t)pa + 8 > s->vm->ram_size) {
+    if ((uint64_t)pa + 8 > s->vm->phys_end) {
         return;
     }
     uint8_t *p = s->vm->phys + pa;
@@ -359,7 +359,7 @@ static void transmit(Nvnet *s)
             break;
         }
         const uint32_t len = (uint32_t)d.len + 1;
-        if (s->tx_off + len <= TX_BUF && (uint64_t)d.buf + len <= s->vm->ram_size) {
+        if (s->tx_off + len <= TX_BUF && (uint64_t)d.buf + len <= s->vm->phys_end) {
             memcpy(s->tx_buf + s->tx_off, s->vm->phys + d.buf, len);
             s->tx_off += len;
         } else {
@@ -472,7 +472,7 @@ static bool receive_one(Nvnet *s)
     const uint32_t pa = cur_desc(s, true);
     Desc d;
     desc_load(s, pa, &d);
-    if (len > (size_t)d.len + 1 || (uint64_t)d.buf + len > s->vm->ram_size) {
+    if (len > (size_t)d.len + 1 || (uint64_t)d.buf + len > s->vm->phys_end) {
         s->rx_dropped++;                    /* doesn't fit its buffer */
         set_idle(s, true);
         return true;

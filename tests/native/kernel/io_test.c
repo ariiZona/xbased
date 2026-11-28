@@ -92,6 +92,9 @@ bool nc_chd_is(int fd) { (void)fd; return false; }
 bool nc_chd_read(int fd, void *buf, size_t len, uint64_t off) { (void)fd; (void)buf; (void)len; (void)off; return false; }
 uint64_t nc_chd_size(int fd) { (void)fd; return 0; }
 uint64_t nc_nbd_size(int fd) { (void)fd; return 0; }
+void nc_vm_kpool(NcVm *vm, uint32_t pa, uint32_t len) { (void)vm; (void)pa; (void)len; }
+NcThread *nc_ps_thread_of(NcKernel *k, uint32_t ethread) { (void)k; (void)ethread; return NULL; }
+uint32_t nc_ke_mutant_owner(NcKernel *k, uint32_t mutant) { (void)k; (void)mutant; return 0; }
 bool nc_fold_attach(int fd) { (void)fd; return false; }
 void nc_fold_detach(int fd) { (void)fd; }
 bool nc_fold_is(int fd) { (void)fd; return false; }
@@ -467,6 +470,7 @@ int main(void)
     g_vm.phys = g_ram;
     g_vm.pte = g_pte;
     g_vm.ram_size = MEM;
+    g_vm.phys_end = MEM;
     g_k.vm = &g_vm;
     g_disc.fd = -1;
     g_k.disc = &g_disc;

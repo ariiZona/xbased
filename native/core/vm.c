@@ -65,8 +65,12 @@ bool nc_vm_init(NcVm *vm, uint32_t ram_size)
 {
     memset(vm, 0, sizeof(*vm));
     vm->ram_fd = -1;
+    /* the hidden memory past retail RAM, backed from the start and reached
+     * only once opened (nc_vm_shadow_open) */
+    const uint32_t shadow = ram_size == NC_RAM_RETAIL ? NC_SHADOW_SIZE : 0;
+    const uint32_t backing = shadow ? NC_SHADOW_BASE + shadow : ram_size;
 #ifdef _WIN32
-    if (!nc_vmos_init(vm, ram_size)) {
+    if (!nc_vmos_init(vm, backing)) {
         return false;
     }
     vm->ram_size = ram_size;
@@ -109,17 +113,20 @@ bool nc_vm_init(NcVm *vm, uint32_t ram_size)
 
     /* Guest RAM: a memfd, mapped at every address the guest sees it */
     vm->ram_fd = memfd("xbased-ram");
-    if (vm->ram_fd < 0 || ftruncate(vm->ram_fd, ram_size) != 0) {
+    if (vm->ram_fd < 0 || ftruncate(vm->ram_fd, backing) != 0) {
         nc_log("xbased-native", "vm: guest RAM memfd failed: %s", strerror(errno));
         return false;
     }
     vm->ram_size = ram_size;
 #endif
-    vm->page_used = calloc(ram_size / NC_PAGE, 1);
+    vm->shadow_base = shadow ? NC_SHADOW_BASE : 0;
+    vm->shadow_size = shadow;
+    vm->phys_end = ram_size;
+    vm->page_used = calloc(backing / NC_PAGE, 1);
     vm->pte = calloc((1ull << 32) / NC_PAGE, sizeof(uint32_t));
-    vm->rmap = calloc(ram_size / NC_PAGE, sizeof(uint32_t));
-    vm->wp = calloc(ram_size / NC_PAGE, 1);
-    vm->pin = calloc(ram_size / NC_PAGE, 1);
+    vm->rmap = calloc(backing / NC_PAGE, sizeof(uint32_t));
+    vm->wp = calloc(backing / NC_PAGE, 1);
+    vm->pin = calloc(backing / NC_PAGE, 1);
     if (!vm->page_used || !vm->pte || !vm->rmap || !vm->wp || !vm->pin) {
         return false;
     }
@@ -127,7 +134,7 @@ bool nc_vm_init(NcVm *vm, uint32_t ram_size)
 #ifndef _WIN32
     /* Host code's own view of RAM, outside the guest's address space: never
      * write-protected (dirty tracking applies to guest accesses). */
-    void *phys = mmap(NULL, ram_size, PROT_READ | PROT_WRITE, MAP_SHARED, vm->ram_fd, 0);
+    void *phys = mmap(NULL, backing, PROT_READ | PROT_WRITE, MAP_SHARED, vm->ram_fd, 0);
     if (phys == MAP_FAILED) {
         nc_log("xbased-native", "vm: RAM view failed: %s", strerror(errno));
         return false;
@@ -153,7 +160,7 @@ bool nc_vm_init(NcVm *vm, uint32_t ram_size)
 
 bool nc_vm_map(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len)
 {
-    if ((va | pa | len) & (NC_PAGE - 1) || (uint64_t)pa + len > vm->ram_size ||
+    if ((va | pa | len) & (NC_PAGE - 1) || (uint64_t)pa + len > nc_vm_backing(vm) ||
         (uint64_t)va + len > (1ull << 32)) {
         nc_log("xbased-native", "vm: bad map va=%08x pa=%08x len=%x", va, pa, len);
         return false;
@@ -171,7 +178,9 @@ bool nc_vm_map(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len)
         return false;
     }
 #endif
-    const bool window = va == NC_CONTIG_WINDOW || va == NC_GPU_WINDOW;
+    /* the views of RAM (contiguous, GPU) and of the hidden memory (contiguous) */
+    const bool window = va == NC_CONTIG_WINDOW || va == NC_GPU_WINDOW ||
+                        (vm->shadow_size && va == NC_CONTIG_WINDOW + vm->shadow_base);
     for (uint32_t off = 0; off < len; off += NC_PAGE) {
         const uint32_t page = (pa + off) / NC_PAGE;
         vm->pte[(va + off) / NC_PAGE] = (pa + off) | NC_PTE_VALID;
@@ -225,7 +234,9 @@ NcVmDma nc_vm_dma;
 static void prot_views(NcVm *vm, uint32_t page, uint32_t n, int prot)
 {
     guest_protect(vm, NC_CONTIG_WINDOW + page * NC_PAGE, (size_t)n * NC_PAGE, prot);
-    guest_protect(vm, NC_GPU_WINDOW + page * NC_PAGE, (size_t)n * NC_PAGE, prot);
+    if (page < vm->ram_size / NC_PAGE) {    /* (the hidden memory has no GPU view) */
+        guest_protect(vm, NC_GPU_WINDOW + page * NC_PAGE, (size_t)n * NC_PAGE, prot);
+    }
     uint32_t run_va = 0, run_n = 0;
     for (uint32_t i = 0; i <= n; i++) {
         uint32_t va = 0;
@@ -297,14 +308,14 @@ void nc_vm_protect_pages(NcVm *vm, uint32_t pa, uint32_t n, bool ro)
 void nc_vm_noaccess(NcVm *vm, uint32_t pa, uint32_t n, bool on)
 {
     const uint32_t page = pa / NC_PAGE;
-    if (!n || (uint64_t)page + n > vm->ram_size / NC_PAGE) {
+    if (!n || (uint64_t)page + n > vm->phys_end / NC_PAGE) {
         return;
     }
     if (!g_na) {
         if (!on) {
             return;
         }
-        uint8_t *na = calloc(vm->ram_size / NC_PAGE, 1);
+        uint8_t *na = calloc(nc_vm_backing(vm) / NC_PAGE, 1);
         uint8_t *none = NULL;
         if (!na || !__atomic_compare_exchange_n(&g_na, &none, na, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             free(na);
@@ -335,7 +346,7 @@ void nc_vm_noaccess(NcVm *vm, uint32_t pa, uint32_t n, bool on)
 
 bool nc_vm_noaccess_has(NcVm *vm, uint32_t pa)
 {
-    return g_na && pa < vm->ram_size && __atomic_load_n(&g_na[pa / NC_PAGE], __ATOMIC_ACQUIRE);
+    return g_na && pa < vm->phys_end && __atomic_load_n(&g_na[pa / NC_PAGE], __ATOMIC_ACQUIRE);
 }
 
 void nc_vm_protect_page(NcVm *vm, uint32_t pa, bool ro)
@@ -521,7 +532,7 @@ static uint32_t free_pages(const NcVm *vm);
 void nc_vm_free_phys(NcVm *vm, uint32_t pa, uint32_t len)
 {
     const uint32_t pages = nc_align_up(len, NC_PAGE) / NC_PAGE;
-    if ((uint64_t)pa + (uint64_t)pages * NC_PAGE <= vm->ram_size) {
+    if ((uint64_t)pa + (uint64_t)pages * NC_PAGE <= vm->phys_end) {
         for (uint32_t p = pa / NC_PAGE; p < pa / NC_PAGE + pages; p++) {
             /* A page freed while an address still maps it is handed out twice. */
             const uint32_t va = vm->rmap[p];
@@ -866,6 +877,174 @@ uint32_t nc_vm_alloc_phys_block(NcVm *vm, uint32_t len)
         pa = nc_vm_alloc_phys(vm, len, 0, vm->ram_size);
     }
     return pa != UINT32_MAX ? pa : nc_vm_alloc_phys_high(vm, len);
+}
+
+void nc_vm_kpool(NcVm *vm, uint32_t pa, uint32_t len)
+{
+    const uint64_t end = ((uint64_t)pa + len + NC_PAGE - 1) / NC_PAGE;
+    for (uint64_t p = pa / NC_PAGE; p < end && p < vm->ram_size / NC_PAGE; p++) {
+        if (vm->page_used[p]) {
+            vm->page_used[p] = NC_PAGE_POOL;
+        }
+    }
+}
+
+/* The hidden memory: physical pages past RAM, at their addresses in both
+ * views of RAM, for a contiguous block the console would have placed where
+ * only the kernel pool's pages are here (mm.c contig_alloc). The console's
+ * pool is system memory, page by page from the bottom of RAM with the
+ * title's virtual pages, under its own addresses (0xD0000000): it never
+ * stands between the contiguous blocks, which come from the top. Ours is
+ * reached through the contiguous window and grows a chunk at a time where
+ * those blocks go: RalliSport Challenge 2 frees a race's blocks and asks
+ * for 25.3 MiB as its main menu comes back, with 48 MiB free, four pool
+ * pages with objects still in them stood in every window, and the title
+ * showed its dirty disc screen. Nothing reaches the hidden memory before
+ * its first block (phys_end stays at RAM's end): every other run is the
+ * same. */
+void (*nc_vm_grow_hooks[4])(uint32_t phys_end);
+
+bool nc_vm_shadow_open(NcVm *vm)
+{
+    if (!vm->shadow_size) {
+        return false;
+    }
+    if (vm->phys_end > vm->ram_size) {
+        return true;
+    }
+    /* its contiguous window only: the GPU's view of it would be where the
+     * devices' registers are (0xFC000000 on) */
+    if (!nc_vm_map(vm, NC_CONTIG_WINDOW + vm->shadow_base, vm->shadow_base, vm->shadow_size)) {
+        nc_log("xbased-native", "vm: the hidden memory's view failed");
+        return false;
+    }
+    vm->phys_end = vm->shadow_base + vm->shadow_size;
+    for (unsigned i = 0; i < sizeof(nc_vm_grow_hooks) / sizeof(nc_vm_grow_hooks[0]); i++) {
+        if (nc_vm_grow_hooks[i]) {
+            nc_vm_grow_hooks[i](vm->phys_end);
+        }
+    }
+    nc_log("xbased-native", "vm: the hidden memory opened, %u MiB at %08x", vm->shadow_size >> 20, vm->shadow_base);
+    return true;
+}
+
+uint32_t nc_vm_hold_for_pool(NcVm *vm, uint32_t len, uint32_t lo, uint32_t hi, uint32_t align, uint8_t mark,
+                             uint32_t *pool_pages)
+{
+    *pool_pages = 0;
+    if (!len || len > vm->ram_size) {
+        return UINT32_MAX;
+    }
+    const uint32_t pages = nc_align_up(len, NC_PAGE) / NC_PAGE;
+    const uint32_t step = (align > NC_PAGE ? align : NC_PAGE) / NC_PAGE;
+    const uint32_t first = nc_align_up(lo, step * NC_PAGE) / NC_PAGE;
+    const uint32_t last = (hi && hi < vm->ram_size ? hi : vm->ram_size) / NC_PAGE;
+    if (last < pages || first > last - pages || free_pages(vm) < pages) {
+        return UINT32_MAX;
+    }
+    /* the highest such window: a page that neither moves nor is the pool's
+     * turns down every window over it, the next candidate ends below it */
+    int64_t s = (int64_t)((last - pages) / step * step);
+    uint32_t pool = 0;
+    while (s >= first) {
+        uint32_t i = pages;
+        pool = 0;
+        for (; i > 0; i--) {
+            const uint32_t q = (uint32_t)s + i - 1;
+            if (vm->page_used[q]) {
+                if (vm->page_used[q] == NC_PAGE_POOL) {
+                    pool++;
+                } else if (!movable(vm, q)) {
+                    break;
+                }
+            }
+        }
+        if (i == 0) {
+            break;
+        }
+        const uint32_t u = (uint32_t)s + i - 1;
+        if (u < pages) {
+            return UINT32_MAX;
+        }
+        s = (int64_t)((u - pages) / step * step);
+    }
+    if (s < first || !pool) {
+        return UINT32_MAX;              /* no such window, or one the pool isn't in (not this fallback's) */
+    }
+    /* RAM held for the block, as much as it is: the window's free pages
+     * (where the console's block would be), then the lowest free ones */
+    uint32_t need = pages;
+    for (uint32_t p = (uint32_t)s; p < (uint32_t)s + pages && need; p++) {
+        if (!vm->page_used[p] && !(g_na && g_na[p])) {
+            vm->page_used[p] = mark;
+            need--;
+        }
+    }
+    for (uint32_t p = 0; p < vm->ram_size / NC_PAGE && need; p++) {
+        if (!vm->page_used[p] && !(g_na && g_na[p])) {
+            vm->page_used[p] = mark;
+            need--;
+        }
+    }
+    if (need) {
+        nc_vm_release_mark(vm, mark);
+        return UINT32_MAX;
+    }
+    *pool_pages = pool;
+    return (uint32_t)s * NC_PAGE;
+}
+
+uint32_t nc_vm_shadow_alloc(NcVm *vm, uint32_t len, uint32_t align, uint8_t mark)
+{
+    if (!vm->shadow_size || !len || len > vm->shadow_size) {
+        return UINT32_MAX;
+    }
+    const uint32_t pages = nc_align_up(len, NC_PAGE) / NC_PAGE;
+    const uint32_t step = (align > NC_PAGE ? align : NC_PAGE) / NC_PAGE;
+    const uint32_t end = (vm->shadow_base + vm->shadow_size) / NC_PAGE;
+    uint32_t s = nc_align_up(vm->shadow_base / NC_PAGE, step);
+    while (s + pages <= end) {
+        uint32_t i = 0;
+        while (i < pages && !vm->page_used[s + i]) {
+            i++;
+        }
+        if (i == pages) {
+            memset(vm->page_used + s, mark, pages);
+            return s * NC_PAGE;
+        }
+        s = nc_align_up(s + i + 1, step);
+    }
+    return UINT32_MAX;
+}
+
+void nc_vm_release_mark(NcVm *vm, uint8_t mark)
+{
+    const uint32_t ram_pages = vm->ram_size / NC_PAGE, end = nc_vm_backing(vm) / NC_PAGE;
+    for (uint32_t p = 0; p < end; p++) {
+        if (vm->page_used[p] != mark) {
+            continue;
+        }
+        vm->page_used[p] = 0;
+        vm->pin[p] = 0;
+        if (p >= ram_pages && nc_vm_free_hook) {
+            nc_vm_free_hook(p * NC_PAGE, NC_PAGE);      /* the block's own: what the HLE knew of them goes */
+        }
+    }
+}
+
+uint8_t nc_vm_free_mark(const NcVm *vm)
+{
+    const uint32_t end = nc_vm_backing(vm) / NC_PAGE;
+    for (unsigned m = NC_MARK_FIRST; m <= NC_MARK_LAST; m++) {
+        uint32_t p = 0;
+        while (p < end && vm->page_used[p] != m) {
+            p++;
+        }
+        if (p == end) {
+            return (uint8_t)m;
+        }
+    }
+    return 0;
 }
 
 static uint32_t free_pages(const NcVm *vm)

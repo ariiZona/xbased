@@ -100,9 +100,11 @@ static void *ram_part(void *arg)
 bool nc_ram_state_save(NcBuf *b)
 {
     const NcVm *vm = nc_state_kernel()->vm;
-    const NcRamState st = {vm->ram_size, RAM_BLOCK};
+    /* RAM, and the hidden memory past it once opened (vm.c nc_vm_shadow_open):
+     * a state without hidden blocks is what it was */
+    const NcRamState st = {vm->phys_end, RAM_BLOCK};
     nc_rec_put(b, &nc_rec_NcRamState, &st);
-    const uint32_t nblk = vm->ram_size / RAM_BLOCK;
+    const uint32_t nblk = vm->phys_end / RAM_BLOCK;
     const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     const unsigned np = ncpu < 4 ? 4 : ncpu > RAM_PARTS ? RAM_PARTS : (unsigned)ncpu;
     RamPart parts[RAM_PARTS];
@@ -131,7 +133,7 @@ bool nc_ram_state_save(NcBuf *b)
         deflated += parts[i].deflated;
         bytes += parts[i].bytes;
     }
-    nc_log("xbased-native-state", "RAM: %u MiB, %u blocks zero, %u deflated, %.1f MiB stored", vm->ram_size >> 20, zero,
+    nc_log("xbased-native-state", "RAM: %u MiB, %u blocks zero, %u deflated, %.1f MiB stored", vm->phys_end >> 20, zero,
            deflated, bytes / 1048576.0);
     return !b->fail;
 }
@@ -141,12 +143,13 @@ bool nc_ram_state_load(NcRd *r, unsigned v)
     NcVm *vm = nc_state_kernel()->vm;
     NcRamState st = {0};
     nc_rec_get(r, &nc_rec_NcRamState, &st, v);
-    if (st.ram_size != vm->ram_size || st.block != RAM_BLOCK) {
+    const bool hidden = vm->shadow_size && st.ram_size == nc_vm_backing(vm);
+    if ((st.ram_size != vm->ram_size && !hidden) || st.block != RAM_BLOCK || (hidden && !nc_vm_shadow_open(vm))) {
         nc_log("xbased-native-state", "RAM: the state's is %u MiB in %u-byte blocks, this one %u MiB", st.ram_size >> 20,
                st.block, vm->ram_size >> 20);
         return false;
     }
-    for (uint32_t off = 0; off < vm->ram_size; off += RAM_BLOCK) {
+    for (uint32_t off = 0; off < st.ram_size; off += RAM_BLOCK) {
         uint8_t *p = vm->phys + off;
         const uint8_t kind = nc_rd_u8(r);
         if (kind == BLK_ZERO) {
@@ -171,10 +174,12 @@ bool nc_ram_state_load(NcRd *r, unsigned v)
 
 /* ------------------------------------------------------------------- VM */
 
+/* (the hidden memory's view too, vm.c nc_vm_shadow_open) */
 static bool in_window(const NcVm *vm, uint32_t va)
 {
     return (va >= NC_CONTIG_WINDOW && va - NC_CONTIG_WINDOW < vm->ram_size) ||
-           (va >= NC_GPU_WINDOW && va - NC_GPU_WINDOW < vm->ram_size);
+           (va >= NC_GPU_WINDOW && va - NC_GPU_WINDOW < vm->ram_size) ||
+           (vm->shadow_size && va - (NC_CONTIG_WINDOW + vm->shadow_base) < vm->shadow_size);
 }
 
 /* [va, va + len) reaches into one of the two views of all of RAM: a state's
@@ -182,9 +187,10 @@ static bool in_window(const NcVm *vm, uint32_t va)
  * pages where the kernel takes address and page for the same. */
 static bool over_window(const NcVm *vm, uint32_t va, uint64_t len)
 {
-    const uint64_t end = (uint64_t)va + len;
+    const uint64_t end = (uint64_t)va + len, sw = (uint64_t)NC_CONTIG_WINDOW + vm->shadow_base;
     return (va < (uint64_t)NC_CONTIG_WINDOW + vm->ram_size && end > NC_CONTIG_WINDOW) ||
-           (va < (uint64_t)NC_GPU_WINDOW + vm->ram_size && end > NC_GPU_WINDOW);
+           (va < (uint64_t)NC_GPU_WINDOW + vm->ram_size && end > NC_GPU_WINDOW) ||
+           (vm->shadow_size && va < sw + vm->shadow_size && end > sw);
 }
 
 /* The mappings outside the windows, as runs of pages mapped in order:
@@ -221,10 +227,10 @@ static void put_run(void *ctx, const NcVmRun *run)
 bool nc_vm_state_save(NcBuf *b)
 {
     const NcVm *vm = nc_state_kernel()->vm;
-    const NcVmState st = {vm->ram_size, runs(vm, NULL, NULL)};
+    const NcVmState st = {vm->phys_end, runs(vm, NULL, NULL)};
     nc_rec_put(b, &nc_rec_NcVmState, &st);
     runs(vm, put_run, b);
-    const uint32_t pages = vm->ram_size / NC_PAGE;
+    const uint32_t pages = vm->phys_end / NC_PAGE;
     nc_buf_put(b, vm->page_used, pages);
     nc_buf_put(b, vm->rmap, (size_t)pages * sizeof(uint32_t));
     nc_buf_put(b, vm->pin, pages);
@@ -242,7 +248,8 @@ bool nc_vm_state_load(NcRd *r, unsigned v)
     NcVm *vm = nc_state_kernel()->vm;
     NcVmState st = {0};
     nc_rec_get(r, &nc_rec_NcVmState, &st, v);
-    if (st.ram_size != vm->ram_size) {
+    if (st.ram_size != vm->ram_size && !(vm->shadow_size && st.ram_size == nc_vm_backing(vm) &&
+                                         nc_vm_shadow_open(vm))) {
         return false;
     }
     /* what this boot mapped goes; the state's mappings come back */
@@ -256,7 +263,7 @@ bool nc_vm_state_load(NcRd *r, unsigned v)
             return false;
         }
     }
-    const uint32_t pages = vm->ram_size / NC_PAGE;
+    const uint32_t pages = st.ram_size / NC_PAGE;
     nc_rd_get(r, vm->page_used, pages);
     nc_rd_get(r, vm->rmap, (size_t)pages * sizeof(uint32_t));
     nc_rd_get(r, vm->pin, pages);

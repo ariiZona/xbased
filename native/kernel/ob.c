@@ -9,14 +9,236 @@
 #include "native/kernel/kernel.h"
 
 #include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define OB_HEADER 0x10u
 
 /* Body size of each type's objects, for freeing them: file and symbolic-link
- * objects, all one size, whose host state goes with them (nc_io_close). Other
- * types stay: the scheduler, waits and timers keep their addresses. */
+ * objects, all one size, whose host state goes with them (nc_io_close). */
 static uint32_t g_ob_size[NC_OB_TYPES];
+
+/* Events, semaphores, mutants and threads go as the console's do: with their
+ * last handle and reference (ObfDereferenceObject), unless a thread waits on
+ * one; a thread once it has ended and is off its stack, and not while a
+ * mutant still names it its owner. Kept for good, the ones a title made and
+ * closed filled the pool: RalliSport Challenge 2 makes and closes events,
+ * mutants and threads loading each race (the console's count stays the
+ * same race after race), the pool grew a chunk at a time where the
+ * contiguous blocks go, and its main menu's 25.3 MiB found no room with 48
+ * MiB free. Each one's body size is kept here as it is made (threads' differ
+ * by their extension); one made before a savestate's load isn't known and
+ * stays, as all of them did before. */
+typedef struct VaMap {
+    uint32_t *key, *val;
+    uint32_t cap, n;
+} VaMap;
+static VaMap g_sized;
+/* mutants that have had an owner (ke.c's acquire): a thread one names stays */
+static VaMap g_owned;
+/* closed ones a wait kept: freed once nothing waits on them (ob_retry) */
+static uint32_t *g_waited;
+static unsigned g_nwaited, g_waited_cap;
+
+static uint32_t map_hash(uint32_t va, uint32_t cap)
+{
+    return ((va >> 4) * 2654435761u) & (cap - 1);
+}
+
+static uint32_t map_get(const VaMap *m, uint32_t va)
+{
+    if (!m->cap) {
+        return 0;
+    }
+    for (uint32_t i = map_hash(va, m->cap);; i = (i + 1) & (m->cap - 1)) {
+        if (!m->key[i]) {
+            return 0;
+        }
+        if (m->key[i] == va) {
+            return m->val[i];
+        }
+    }
+}
+
+static void map_put(VaMap *m, uint32_t va, uint32_t val)
+{
+    if ((m->n + 1) * 2 > m->cap) {
+        VaMap g = {0};
+        g.cap = m->cap ? m->cap * 2 : 1024;
+        g.key = calloc(g.cap, sizeof(uint32_t));
+        g.val = calloc(g.cap, sizeof(uint32_t));
+        if (!g.key || !g.val) {
+            free(g.key);
+            free(g.val);
+            return;                     /* (not known: it stays) */
+        }
+        for (uint32_t i = 0; i < m->cap; i++) {
+            if (m->key[i]) {
+                map_put(&g, m->key[i], m->val[i]);
+            }
+        }
+        free(m->key);
+        free(m->val);
+        *m = g;
+    }
+    uint32_t i = map_hash(va, m->cap);
+    while (m->key[i] && m->key[i] != va) {
+        i = (i + 1) & (m->cap - 1);
+    }
+    m->n += !m->key[i];
+    m->key[i] = va;
+    m->val[i] = val;
+}
+
+static void map_del(VaMap *m, uint32_t va)
+{
+    if (!m->cap) {
+        return;
+    }
+    uint32_t i = map_hash(va, m->cap);
+    while (m->key[i] != va) {
+        if (!m->key[i]) {
+            return;
+        }
+        i = (i + 1) & (m->cap - 1);
+    }
+    m->key[i] = 0;
+    m->n--;
+    /* the entries after it in its run move back where a lookup finds them */
+    for (uint32_t j = (i + 1) & (m->cap - 1); m->key[j]; j = (j + 1) & (m->cap - 1)) {
+        const uint32_t h = map_hash(m->key[j], m->cap);
+        if (((j - h) & (m->cap - 1)) >= ((j - i) & (m->cap - 1))) {
+            m->key[i] = m->key[j];
+            m->val[i] = m->val[j];
+            m->key[j] = 0;
+            i = j;
+        }
+    }
+}
+
+static bool counted(enum NcObType type)
+{
+    return type == NC_OB_EVENT || type == NC_OB_SEMAPHORE || type == NC_OB_MUTANT || type == NC_OB_THREAD;
+}
+
+static void waited_drop(uint32_t object)
+{
+    for (unsigned i = 0; i < g_nwaited; i++) {
+        if (g_waited[i] == object) {
+            g_waited[i] = g_waited[--g_nwaited];
+            return;
+        }
+    }
+}
+
+static void waited_add(uint32_t object)
+{
+    for (unsigned i = 0; i < g_nwaited; i++) {
+        if (g_waited[i] == object) {
+            return;
+        }
+    }
+    if (g_nwaited == g_waited_cap) {
+        const unsigned cap = g_waited_cap ? g_waited_cap * 2 : 64;
+        uint32_t *w = cap <= 65536 ? realloc(g_waited, cap * sizeof(uint32_t)) : NULL;
+        if (!w) {
+            return;                     /* (it stays) */
+        }
+        g_waited = w;
+        g_waited_cap = cap;
+    }
+    g_waited[g_nwaited++] = object;
+}
+
+static enum NcObType type_of(NcKernel *k, uint32_t object);
+
+void nc_ob_mutant_owned(uint32_t mutant)
+{
+    if (!map_get(&g_owned, mutant)) {
+        map_put(&g_owned, mutant, 1);
+    }
+}
+
+/* A mutant (the title's own too) names the thread its owner: it never
+ * released it, and a thread made where this one was would own it. */
+static bool mutant_owner_is(NcKernel *k, uint32_t ethread)
+{
+    for (uint32_t i = 0; i < g_owned.cap; i++) {
+        const uint32_t m = g_owned.key[i];
+        if (m && nc_vm_phys(k->vm, m) != UINT32_MAX && nc_ke_mutant_owner(k, m) == ethread) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* An event, semaphore, mutant or thread with no handle and no reference
+ * left goes; true if it went. */
+static bool release_counted(NcKernel *k, uint32_t object, enum NcObType type)
+{
+    const uint32_t hdr = object - OB_HEADER;
+    const uint32_t size = map_get(&g_sized, object);
+    if (!size || nc_vm_rd32(k->vm, hdr + 0x4) || nc_vm_rd32(k->vm, hdr) > 1 ||
+        nc_vm_rd32(k->vm, hdr + 0x8) != k->type_va[type]) {
+        return false;
+    }
+    if (type == NC_OB_THREAD && (nc_ps_thread_of(k, object) || mutant_owner_is(k, object))) {
+        return false;       /* running or not yet off its stack (nc_ob_thread_gone), or a mutant's owner */
+    }
+    if (nc_ke_object_waited(k, object)) {
+        waited_add(object);
+        return false;
+    }
+    waited_drop(object);
+    map_del(&g_sized, object);
+    if (type == NC_OB_MUTANT) {
+        map_del(&g_owned, object);
+    }
+    nc_vm_wr32(k->vm, hdr + 0x8, 0);    /* a stale lookup of it fails the type check */
+    k->pool_ob -= OB_HEADER + size;
+    nc_pool_free(k, hdr, OB_HEADER + size);
+    return true;
+}
+
+/* The closed ones waits kept, again: those nothing waits on now go. */
+static void ob_retry(NcKernel *k)
+{
+    for (unsigned i = g_nwaited; i-- > 0;) {
+        if (i >= g_nwaited) {
+            continue;
+        }
+        const uint32_t object = g_waited[i];
+        const enum NcObType type = type_of(k, object);
+        if (type >= NC_OB_TYPES || !counted(type) || !map_get(&g_sized, object)) {
+            waited_drop(object);        /* (not one any more) */
+        } else if (!nc_ke_object_waited(k, object) && !release_counted(k, object, type)) {
+            waited_drop(object);        /* a handle or a reference again: it goes with that one */
+        }
+    }
+}
+
+void nc_ob_thread_gone(NcKernel *k, uint32_t ethread)
+{
+    release_counted(k, ethread, NC_OB_THREAD);
+}
+
+void nc_ob_reference(NcKernel *k, uint32_t object)
+{
+    const uint32_t hdr = object - OB_HEADER;
+    nc_vm_wr32(k->vm, hdr, nc_vm_rd32(k->vm, hdr) + 1);
+}
+
+/* A savestate loaded: its objects are none of those this run made. */
+void nc_ob_forget(void)
+{
+    free(g_sized.key);
+    free(g_sized.val);
+    g_sized = (VaMap){0};
+    free(g_owned.key);
+    free(g_owned.val);
+    g_owned = (VaMap){0};
+    g_nwaited = 0;
+}
 
 static bool freeable(enum NcObType type)
 {
@@ -38,6 +260,10 @@ static enum NcObType type_of(NcKernel *k, uint32_t object)
  * the one it was created with). */
 static void release(NcKernel *k, uint32_t object, enum NcObType type)
 {
+    if (type < NC_OB_TYPES && counted(type)) {
+        release_counted(k, object, type);
+        return;
+    }
     const uint32_t hdr = object - OB_HEADER;
     if (type >= NC_OB_TYPES || !freeable(type) || !g_ob_size[type] || g_ob_size[type] == UINT32_MAX ||
         nc_vm_rd32(k->vm, hdr + 0x4) ||
@@ -73,6 +299,9 @@ void nc_ob_dereference(NcKernel *k, uint32_t object)
 
 uint32_t nc_ob_create(NcKernel *k, enum NcObType type, uint32_t body_size)
 {
+    if (g_nwaited) {
+        ob_retry(k);
+    }
     if (freeable(type) && g_ob_size[type] != UINT32_MAX) {
         if (g_ob_size[type] && g_ob_size[type] != body_size) {
             nc_log("xbased-native", "ob: type %u objects of %u and %u bytes: not freed", type, g_ob_size[type],
@@ -87,6 +316,9 @@ uint32_t nc_ob_create(NcKernel *k, enum NcObType type, uint32_t body_size)
         return 0;
     }
     k->pool_ob += OB_HEADER + body_size;
+    if (counted(type) && body_size) {
+        map_put(&g_sized, h + OB_HEADER, body_size);
+    }
     nc_vm_wr32(k->vm, h + 0x0, 1);              /* PointerCount */
     nc_vm_wr32(k->vm, h + 0x8, k->type_va[type]); /* Type */
     return h + OB_HEADER;
@@ -186,7 +418,7 @@ static uint64_t NtDuplicateObject(NcKernel *k, NcFrame *f, const uint32_t *a)
  * XAPI's CreateEvent makes and OpenEvent opens by ObOpenObjectByName), in a
  * list in the kernel's memory so a savestate keeps it with the objects:
  * the first node at NC_OB_NAMES, a node {next, object, type, the name's
- * length, the name}. Such objects are never freed (freeable). */
+ * length, the name}. A name goes with the last handle (nc_ob_unname). */
 #define NC_OB_NAMES (NC_KERNEL_VA + 0xA400u)
 #define OBJ_OPENIF 0x80u
 #define STATUS_OBJECT_NAME_EXISTS 0x40000000u

@@ -1,5 +1,29 @@
 # xbased changelog
 
+## 1.2.17 (2026-11)
+
+### Fixes
+- Voodoo Vince: the crystal ball and the glass of bottles and windows came
+  out white (#408). The game draws the reflections for that glass once, as
+  the scene starts, into render targets it then joins into a cube, and the
+  emulator dropped what those targets already held when it made the cube.
+  The same fix brings back the reflections on the building glass and the
+  headlights in Juiced (#72).
+- Sega GT 2002: the cars came out washed out white after a few races (#91).
+  Every race and every car shown in the menus gets a reflection cube of its
+  own, and the old ones were never let go, so after a race or two there was
+  no room left for new ones. The old ones now go once room runs short.
+- RalliSport Challenge 2 could end on the dirty disc screen when quitting a
+  race back to the main menu (#118). The emulator's kernel kept every event,
+  semaphore, mutex and thread a game had closed, and those kept the large
+  block the menu asks for from fitting in memory. Closed objects are now
+  freed as on the console, and if a block still can't fit only because of
+  the kernel's own memory it is placed past the console's RAM.
+- Windows: a game could start in an empty window with only its sound
+  playing, more often when the emulator went fullscreen as the game started
+  (#234). The game's own hidden window was stretched over its pictures. It
+  now stays out of the way.
+
 ## 1.2.16 (2026-11)
 
 ### Fixes

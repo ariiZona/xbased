@@ -8,6 +8,9 @@
 
 void hle_guestmem_init(uint8_t *ram, uint64_t size, uint64_t ram_addr_base);
 uint64_t hle_ram_size(void);
+void hle_guestmem_reserve(uint64_t size);
+uint64_t hle_ram_reserve(void);
+void hle_guestmem_grow(uint64_t size);
 /* uint64_t of guest PA 0 (dirty bitmap / notdirty_write address space). */
 uint64_t hle_ram_addr_base(void);
 /* Host pointer for [pa, pa + n), or NULL when it leaves guest RAM. */

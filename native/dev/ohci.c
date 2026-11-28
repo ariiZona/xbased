@@ -161,7 +161,7 @@ static uint64_t now_ns(void)
 /* Guest physical memory, bounds-checked. */
 static uint8_t *phys(Ohci *o, uint32_t pa, uint32_t len)
 {
-    if ((uint64_t)pa + len > o->vm->ram_size) {
+    if ((uint64_t)pa + len > o->vm->phys_end) {
         return NULL;
     }
     return o->vm->phys + pa;
